@@ -1,0 +1,94 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+.Python
+.pytest_cache/
+.coverage*
+htmlcov/
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+.cache/
+.venv/
+venv/
+ENV/
+.env
+.env.*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# IDEs/Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+
+# Logs
+*.log
+logs/
+
+# Docker
+**/data/
+**/tmp/
+*.pid
+*.seed
+
+# gRPC/Protobuf generated files (if regenerated elsewhere)
+# Keep committed versions under grpc_server/proto; ignore re-gen outputs in work dirs
+**/*.pb.cc
+**/*.pb.h
+**/*.pb.go
+**/*_pb2.py
+**/*_pb2.pyi
+**/*_pb2_grpc.py
+**/*_pb2_grpc.pyi
+
+# Node/NestJS (client)
+node_modules/
+.npm/
+.npmrc
+pnp.*
+coverage/
+.nycrc
+.eslintcache
+.next/
+.nuxt/
+.svelte-kit/
+dist/
+.cache-loader/
+
+# TypeScript
+*.tsbuildinfo
+
+# Lock/Env files (keep server/client lockfiles, ignore accidental)
+# Uncomment if you don't want to commit lockfiles
+# package-lock.json
+# yarn.lock
+
+# Local overrides
+*.local
+*.secret
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Temporary files
+*.tmp
+*.bak
+*~

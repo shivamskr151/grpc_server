@@ -1,0 +1,4 @@
+Requirement already satisfied: grpcio-reflection in ./venv/lib/python3.10/site-packages (1.75.1)
+Requirement already satisfied: protobuf<7.0.0,>=6.31.1 in ./venv/lib/python3.10/site-packages (from grpcio-reflection) (6.32.1)
+Requirement already satisfied: grpcio>=1.75.1 in ./venv/lib/python3.10/site-packages (from grpcio-reflection) (1.75.1)
+Requirement already satisfied: typing-extensions~=4.12 in ./venv/lib/python3.10/site-packages (from grpcio>=1.75.1->grpcio-reflection) (4.15.0)

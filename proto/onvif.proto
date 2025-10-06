@@ -1,0 +1,247 @@
+syntax = "proto3";
+
+package onvif;
+
+service OnvifService {
+  rpc GetDeviceInformation(GetDeviceInformationRequest) returns (GetDeviceInformationResponse);
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  rpc GetProfiles(GetProfilesRequest) returns (GetProfilesResponse);
+  rpc GetStreamUri(GetStreamUriRequest) returns (GetStreamUriResponse);
+
+  rpc AbsoluteMove(AbsoluteMoveRequest) returns (AbsoluteMoveResponse);
+  rpc RelativeMove(RelativeMoveRequest) returns (RelativeMoveResponse);
+  rpc ContinuousMove(ContinuousMoveRequest) returns (ContinuousMoveResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+  rpc GetPresets(GetPresetsRequest) returns (GetPresetsResponse);
+  rpc GotoPreset(GotoPresetRequest) returns (GotoPresetResponse);
+  rpc SetPreset(SetPresetRequest) returns (SetPresetResponse);
+  // Create a preset with optional desired position/speed; server auto-generates name if empty
+  rpc CreatePreset(CreatePresetRequest) returns (CreatePresetResponse);
+  rpc RemovePreset(RemovePresetRequest) returns (RemovePresetResponse);
+}
+
+// ========================
+// Device Information
+// ========================
+message GetDeviceInformationRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message GetDeviceInformationResponse {
+  string manufacturer = 1;
+  string model = 2;
+  string firmware_version = 3;
+  string serial_number = 4;
+  string hardware_id = 5;
+}
+
+// ========================
+// Capabilities
+// ========================
+message GetCapabilitiesRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message GetCapabilitiesResponse {
+  bool ptz_support = 1;
+  bool imaging_support = 2;
+  bool media_support = 3;
+  bool events_support = 4;
+}
+
+// ========================
+// Profiles
+// ========================
+message GetProfilesRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message Profile {
+  string token = 1;
+  string name = 2;
+  bool is_fixed = 3;
+}
+
+message GetProfilesResponse {
+  repeated Profile profiles = 1;
+}
+
+// ========================
+// Stream URI
+// ========================
+message GetStreamUriRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  string profile_token = 4;
+  string stream_type = 5;
+}
+
+message GetStreamUriResponse {
+  string uri = 1;
+  string timeout = 2;
+}
+
+// ========================
+// PTZ Movement
+// ========================
+message Vector2D {
+  float x = 1;
+  float y = 2;
+}
+
+message Vector1D {
+  float x = 1;
+}
+
+message PanTilt {
+  Vector2D position = 1;
+  Vector2D speed = 2;
+}
+
+message Zoom {
+  Vector1D position = 1;
+  Vector1D speed = 2;
+}
+
+message AbsoluteMoveRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  string profile_token = 4;
+  PanTilt pan_tilt = 5;
+  Zoom zoom = 6;
+}
+
+message AbsoluteMoveResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RelativeMoveRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  string profile_token = 4;
+  PanTilt pan_tilt = 5;
+  Zoom zoom = 6;
+}
+
+message RelativeMoveResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ContinuousMoveRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  string profile_token = 4;
+  PanTilt pan_tilt = 5;
+  Zoom zoom = 6;
+  int32 timeout = 7;
+}
+
+message ContinuousMoveResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message StopRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  string profile_token = 4;
+  bool pan_tilt = 5;
+  bool zoom = 6;
+}
+
+message StopResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ========================
+// Presets
+// ========================
+message GetPresetsRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  string profile_token = 4;
+}
+
+message Preset {
+  string token = 1;
+  string name = 2;
+  PanTilt pan_tilt = 3;
+  Zoom zoom = 4;
+}
+
+message GetPresetsResponse {
+  repeated Preset presets = 1;
+}
+
+message GotoPresetRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  string profile_token = 4;
+  string preset_token = 5;
+  PanTilt pan_tilt_speed = 6;
+  Zoom zoom_speed = 7;
+}
+
+message GotoPresetResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SetPresetRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  string profile_token = 4;
+  string preset_name = 5;
+}
+
+message SetPresetResponse {
+  bool success = 1;
+  string message = 2;
+  string preset_token = 3;
+}
+
+// CreatePreset: matches the desired JSON schema without preset_name; server ensures non-empty name
+message CreatePresetRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  string profile_token = 4;
+  PanTilt pan_tilt = 5; // desired position/speed (optional)
+  Zoom zoom = 6;        // desired position/speed (optional)
+}
+
+message CreatePresetResponse {
+  bool success = 1;
+  string message = 2;
+  string preset_token = 3;
+}
+
+message RemovePresetRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  string profile_token = 4;
+  string preset_token = 5;
+}
+
+message RemovePresetResponse {
+  bool success = 1;
+  string message = 2;
+}
