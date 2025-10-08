@@ -18,7 +18,7 @@ sys.path.append(os.path.join(current_dir, 'proto'))
 
 from proto import onvif_pb2_grpc
 from proto import onvif_pb2
-from services.onvif_service import OnvifService
+from services.demo_onvif_service import DemoOnvifService
 
 # Configure logging
 logging.basicConfig(
@@ -31,8 +31,8 @@ def serve():
     """Start the gRPC server with reflection and graceful shutdown."""
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
 
-    # Register main service
-    onvif_service = OnvifService()
+    # Register demo service
+    onvif_service = DemoOnvifService()
     onvif_pb2_grpc.add_OnvifServiceServicer_to_server(onvif_service, server)
 
     # Enable server reflection for grpcurl/grpcui usage
@@ -54,7 +54,7 @@ def serve():
 
     # Start server
     server.start()
-    logger.info(f"gRPC server started on {listen_addr} (OnvifService)")
+    logger.info(f"gRPC server started on {listen_addr} (DemoOnvifService)")
 
     # Graceful shutdown on SIGTERM/SIGINT
     def handle_signal(signum, frame):
