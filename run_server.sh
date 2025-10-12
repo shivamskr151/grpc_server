@@ -92,6 +92,11 @@ fi
 # 5. Generate gRPC Python files
 # -----------------------------
 "$VENV_PYTHON" -m grpc_tools.protoc -I./proto --python_out=./proto --grpc_python_out=./proto ./proto/onvif.proto
+"$VENV_PYTHON" -m grpc_tools.protoc -I./proto --python_out=./proto --grpc_python_out=./proto ./proto/onvif_v2.proto
+
+# Fix import paths in generated files
+sed -i '' 's/import onvif_v2_pb2 as onvif__v2__pb2/from . import onvif_v2_pb2 as onvif__v2__pb2/' ./proto/onvif_v2_pb2_grpc.py
+
 echo "✅ gRPC Python files generated."
 
 # -----------------------------
