@@ -8,11 +8,10 @@ from urllib.parse import urlparse
 import grpc
 from onvif import ONVIFCamera
 
-from proto import onvif_pb2
-from proto import onvif_pb2_grpc
+from proto import onvif_v2_pb2 as onvif_pb2
+from proto import onvif_v2_pb2_grpc as onvif_pb2_grpc
 from config import get_config
 
-# Get configuration
 config = get_config()
 
 logging.basicConfig(level=logging.INFO)
@@ -20,16 +19,13 @@ logger = logging.getLogger(__name__)
 
 
 class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
-    """ONVIF gRPC service aligned with onvif.proto and NestJS client."""
+    """ONVIF gRPC service with intelligent native/manual preset tour support."""
 
     def __init__(self):
         self.cameras = {}
         self._wsdl_dir = self._resolve_wsdl_dir()
-        
-        # Preset tour storage (in-memory for demo, should be persistent in production)
-        self.preset_tours = {}
-        
-        # Manual loop execution control
+        self.preset_tours = {}  # Manual tour storage
+        self._camera_capabilities_cache = {}  # Cache PTZ capabilities per camera
         self.manual_loop_lock = threading.Lock()
 
     def _generate_preset_name(self, base_hint=None):
@@ -44,23 +40,21 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             return "Preset_Default"
 
     def _resolve_wsdl_dir(self):
-        # Use configured WSDL directory first
         if config.onvif.wsdl_dir and Path(config.onvif.wsdl_dir).is_dir():
             return config.onvif.wsdl_dir
         
-        # Fallback to environment variable
         env_wsdl_dir = os.getenv("ONVIF_WSDL_DIR")
         if env_wsdl_dir and Path(env_wsdl_dir).is_dir():
             return env_wsdl_dir
         
         try:
-            import wsdl  # type: ignore
+            import wsdl
             wsdl_path = Path(getattr(wsdl, "__file__", "")).parent
             if (wsdl_path / "devicemgmt.wsdl").exists():
                 return str(wsdl_path)
         except Exception:
             pass
-        # Fallback to venv site-packages wsdl dir if exists
+        
         try:
             repo_root = Path(__file__).resolve().parents[2]
             for site_pkg in (repo_root / "grpc_server/venv").rglob("site-packages"):
@@ -92,24 +86,118 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
         host, port = self._parse_device_url(device_url)
         key = f"{host}:{port}:{username}"
         
-        # Use caching if enabled
         if config.onvif.enable_caching and key in self.cameras:
             return self.cameras[key]
         
-        # Create new camera connection
         if self._wsdl_dir:
             camera = ONVIFCamera(host, port, username, password, wsdl_dir=self._wsdl_dir)
         else:
             camera = ONVIFCamera(host, port, username, password)
         
-        # Cache if enabled
         if config.onvif.enable_caching:
             self.cameras[key] = camera
         
         return camera
 
+    def _get_camera_key(self, device_url, username):
+        """Generate a unique key for camera identification."""
+        return f"{device_url}:{username}"
+
+    def _check_native_preset_tour_support(self, camera, device_url, username) -> bool:
+        """
+        Check if camera supports native ONVIF preset tours using GetServiceCapabilities.
+        Results are cached to avoid repeated checks.
+        """
+        camera_key = self._get_camera_key(device_url, username)
+        
+        # Return cached result if available
+        if camera_key in self._camera_capabilities_cache:
+            return self._camera_capabilities_cache[camera_key]
+        
+        logger.info(f"Checking native preset tour support for camera: {camera_key}")
+        
+        try:
+            # Method 1: Use GetServiceCapabilities (most reliable)
+            try:
+                ptz = camera.create_ptz_service()
+                ptz_caps = ptz.GetServiceCapabilities()
+                
+                if hasattr(ptz_caps, 'PresetTour') and ptz_caps.PresetTour:
+                    logger.info(f"Camera {camera_key} supports native preset tours (via GetServiceCapabilities)")
+                    self._camera_capabilities_cache[camera_key] = True
+                    return True
+                else:
+                    logger.info(f"Camera {camera_key} does NOT support native preset tours (GetServiceCapabilities)")
+                    self._camera_capabilities_cache[camera_key] = False
+                    return False
+            except AttributeError as e:
+                logger.debug(f"GetServiceCapabilities not available: {e}")
+            except Exception as e:
+                logger.debug(f"GetServiceCapabilities failed: {e}")
+            
+            # Method 2: Check device capabilities for PTZ preset tour token
+            try:
+                ptz = camera.create_ptz_service()
+                configs = ptz.GetConfigurations()
+                for config_item in configs:
+                    if (hasattr(config_item, 'DefaultPTZPresetTourToken') or 
+                        hasattr(config_item, 'PresetTour')):
+                        logger.info(f"Camera {camera_key} supports native preset tours (via GetConfigurations)")
+                        self._camera_capabilities_cache[camera_key] = True
+                        return True
+            except Exception as e:
+                logger.debug(f"GetConfigurations check failed: {e}")
+            
+            # Method 3: Try to call GetPresetTours
+            try:
+                ptz = camera.create_ptz_service()
+                media = camera.create_media_service()
+                profiles = media.GetProfiles()
+                if profiles:
+                    profile_token = profiles[0].token
+                    get_tours_req = ptz.create_type('GetPresetTours')
+                    get_tours_req.ProfileToken = profile_token
+                    ptz.GetPresetTours(get_tours_req)
+                    logger.info(f"Camera {camera_key} supports native preset tours (via GetPresetTours)")
+                    self._camera_capabilities_cache[camera_key] = True
+                    return True
+            except AttributeError:
+                logger.debug("GetPresetTours method not available")
+            except Exception as e:
+                logger.debug(f"GetPresetTours check failed: {e}")
+            
+            # Method 4: Check if CreatePresetTour method exists
+            try:
+                ptz = camera.create_ptz_service()
+                media = camera.create_media_service()
+                profiles = media.GetProfiles()
+                if profiles:
+                    profile_token = profiles[0].token
+                    # Just check if the method exists by trying to create the type
+                    create_req = ptz.create_type('CreatePresetTour')
+                    logger.info(f"Camera {camera_key} supports native preset tours (method exists)")
+                    self._camera_capabilities_cache[camera_key] = True
+                    return True
+            except AttributeError:
+                logger.info(f"Camera {camera_key} does NOT support native preset tours (method missing)")
+                self._camera_capabilities_cache[camera_key] = False
+                return False
+            except Exception:
+                # Method exists but type creation failed - likely supports it
+                logger.info(f"Camera {camera_key} likely supports native preset tours")
+                self._camera_capabilities_cache[camera_key] = True
+                return True
+            
+        except Exception as e:
+            logger.warning(f"Error checking preset tour support: {e}")
+        
+        # Default to no support if all checks fail
+        logger.info(f"Camera {camera_key} does NOT support native preset tours (default)")
+        self._camera_capabilities_cache[camera_key] = False
+        return False
+
     def _execute_manual_loop(self, camera, tour_data, profile_token):
-        """Execute manual loop for cameras that don't support native patrol."""
+        """Execute manual loop for cameras without native patrol support."""
         logger.info(f"Starting manual loop for tour: {tour_data['name']}")
         
         try:
@@ -120,7 +208,6 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                     if tour_data['stop_manual_loop']:
                         break
                     
-                    # Execute GotoPreset
                     logger.info(f"Manual loop - Moving to preset: {step['preset_token']} at speed: {step['speed']}")
                     
                     try:
@@ -128,7 +215,6 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                         goto_request.ProfileToken = profile_token
                         goto_request.PresetToken = step['preset_token']
                         
-                        # Set speed if supported
                         if hasattr(goto_request, 'Speed') and step['speed'] > 0:
                             goto_request.Speed = {
                                 'PanTilt': {'x': step['speed'], 'y': step['speed']},
@@ -137,11 +223,9 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                         
                         ptz.GotoPreset(goto_request)
                         
-                        # Wait for the specified time
                         wait_time = step['wait_time']
                         logger.info(f"Manual loop - Waiting {wait_time} seconds at preset: {step['preset_token']}")
                         
-                        # Check for stop signal during wait
                         for _ in range(wait_time):
                             if tour_data['stop_manual_loop']:
                                 logger.info(f"Manual loop stopped during wait at preset: {step['preset_token']}")
@@ -150,7 +234,6 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                             
                     except Exception as e:
                         logger.warning(f"Failed to move to preset {step['preset_token']}: {e}")
-                        # Continue with next step even if one fails
                         continue
                         
         except Exception as e:
@@ -184,7 +267,6 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             raise ValueError("No profiles available on device")
 
         def resolve_token(token_or_index):
-            # Handle None, empty string, or whitespace-only strings
             if token_or_index is None or (isinstance(token_or_index, str) and token_or_index.strip() == ""):
                 return None
             for profile in profiles:
@@ -199,16 +281,14 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             return None
 
         def find_substream_profile():
-            """Find substream profile (Profile2) or any non-main stream profile"""
             for profile in profiles:
                 token = getattr(profile, 'token', None)
                 name = getattr(profile, 'Name', '').lower()
-                if token and ('sub' in name or 'Profile_2' in token.lower() or 'profile_2' in token.lower() or 'Profile2' in token.lower() or 'profile2' in token.lower()):
+                if token and ('sub' in name or 'profile_2' in token.lower() or 'profile2' in token.lower()):
                     return token
             return None
 
         def find_available_profile():
-            """Find any available profile"""
             for profile in profiles:
                 token = getattr(profile, 'token', None)
                 if token:
@@ -240,14 +320,12 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                     continue
             return profiles[0].token
 
-        # For non-PTZ operations, try to find substream first, then any available
         if requested_token:
             resolved = resolve_token(requested_token)
             if resolved:
                 return resolved
             raise ValueError("Requested profile token not found")
         
-        # Auto-select substream (Profile2) if available, otherwise any available profile
         substream_token = find_substream_profile()
         if substream_token:
             return substream_token
@@ -257,6 +335,10 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             return available_token
             
         return profiles[0].token
+
+    # ============================================================================
+    # Device Information Methods
+    # ============================================================================
 
     def GetDeviceInformation(self, request, context):
         try:
@@ -281,25 +363,17 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             devicemgmt = camera.create_devicemgmt_service()
             capabilities = devicemgmt.GetCapabilities()
             
-            # Check for PTZ preset tour support
+            # Check for PTZ and native preset tour support
+            ptz_support = bool(getattr(capabilities, 'PTZ', None))
             ptz_preset_tour_support = False
-            try:
-                if getattr(capabilities, 'PTZ', None):
-                    ptz = camera.create_ptz_service()
-                    # Try to get PTZ configuration to check for preset tour support
-                    configs = ptz.GetConfigurations()
-                    if configs:
-                        # Check if any configuration supports preset tours
-                        for config in configs:
-                            if hasattr(config, 'DefaultPTZPresetTourToken') or hasattr(config, 'PresetTour'):
-                                ptz_preset_tour_support = True
-                                break
-            except Exception:
-                # If we can't determine preset tour support, assume manual loop fallback
-                ptz_preset_tour_support = False
+            
+            if ptz_support:
+                ptz_preset_tour_support = self._check_native_preset_tour_support(
+                    camera, request.device_url, request.username
+                )
             
             return onvif_pb2.GetCapabilitiesResponse(
-                ptz_support=bool(getattr(capabilities, 'PTZ', None)),
+                ptz_support=ptz_support,
                 imaging_support=bool(getattr(capabilities, 'Imaging', None)),
                 media_support=bool(getattr(capabilities, 'Media', None)),
                 events_support=bool(getattr(capabilities, 'Events', None)),
@@ -335,7 +409,6 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             self._log_request_details(request, "GetStreamUri")
             camera = self._get_camera(request.device_url, request.username, request.password)
             media = camera.create_media_service()
-            # Handle profile_token safely - it might be None or empty
             profile_token_value = self._get_profile_token_safely(request)
             profile_token = self._resolve_profile_token(camera, profile_token_value)
             get_uri = media.create_type('GetStreamUri')
@@ -347,6 +420,10 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Failed to get stream URI: {e}")
             return onvif_pb2.GetStreamUriResponse()
+
+    # ============================================================================
+    # PTZ Movement Methods
+    # ============================================================================
 
     def AbsoluteMove(self, request, context):
         try:
@@ -452,17 +529,14 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             ptz = camera.create_ptz_service()
             profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
             
-            # Get PTZ status from the camera
             status_request = ptz.create_type('GetStatus')
             status_request.ProfileToken = profile_token
             status = ptz.GetStatus(status_request)
             
-            # Create response with current position and status
             pan_tilt = onvif_pb2.PanTilt()
             zoom = onvif_pb2.Zoom()
             moving = False
             
-            # Extract position information
             if hasattr(status, 'Position') and status.Position:
                 if hasattr(status.Position, 'PanTilt') and status.Position.PanTilt:
                     pan_tilt.position.x = getattr(status.Position.PanTilt, 'x', 0.0)
@@ -470,7 +544,6 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                 if hasattr(status.Position, 'Zoom') and status.Position.Zoom:
                     zoom.position.x = getattr(status.Position.Zoom, 'x', 0.0)
             
-            # Extract movement status
             if hasattr(status, 'MoveStatus') and status.MoveStatus:
                 if hasattr(status.MoveStatus, 'PanTilt') and status.MoveStatus.PanTilt:
                     moving = status.MoveStatus.PanTilt in ['MOVING', 'IDLE']
@@ -491,6 +564,10 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                 success=False,
                 message=f"Failed to get PTZ status: {e}"
             )
+
+    # ============================================================================
+    # Preset Methods
+    # ============================================================================
 
     def GetPresets(self, request, context):
         try:
@@ -519,24 +596,20 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             camera = self._get_camera(request.device_url, request.username, request.password)
             ptz = camera.create_ptz_service()
             resolved_profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
-            # Resolve/validate preset token; if empty, auto-pick the first available
             resolved_preset_token = getattr(request, 'preset_token', None)
             try:
                 presets = ptz.GetPresets({'ProfileToken': resolved_profile_token})
                 if not resolved_preset_token or str(resolved_preset_token).strip() == "":
-                    # Auto-select first available preset if any
                     for p in presets:
                         token = getattr(p, 'token', None)
                         if token:
                             resolved_preset_token = token
                             break
-                # If still missing or not found among presets, return clear error
                 if not resolved_preset_token or not any(getattr(p, 'token', None) == resolved_preset_token for p in presets):
                     context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                     context.set_details("Preset token is missing or not found on device")
                     return onvif_pb2.GotoPresetResponse(success=False, message="Preset token is missing or not found on device")
             except Exception:
-                # If presets retrieval fails, proceed and let device validate
                 if not resolved_preset_token or str(resolved_preset_token).strip() == "":
                     context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                     context.set_details("Preset token is required")
@@ -561,7 +634,6 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
         try:
             camera = self._get_camera(request.device_url, request.username, request.password)
             ptz = camera.create_ptz_service()
-            # Ensure a non-empty preset name regardless of client input
             effective_preset_name = self._generate_preset_name(getattr(request, 'preset_name', None))
             if not effective_preset_name or str(effective_preset_name).strip() == "":
                 effective_preset_name = "Preset_1"
@@ -574,16 +646,13 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             try:
                 result = ptz.SetPreset(create_request)
             except Exception as e1:
-                # Fallback: retry with a very simple non-empty name and alternative request shape
                 try:
                     simple_name = "Preset1"
                     create_request.PresetName = simple_name
                     result = ptz.SetPreset(create_request)
                 except Exception:
-                    # Try dictionary-based request
                     req_dict = { 'PresetName': effective_preset_name }
                     try:
-                        # Include profile token if resolvable
                         try:
                             req_dict['ProfileToken'] = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
                         except Exception:
@@ -605,7 +674,6 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             camera = self._get_camera(request.device_url, request.username, request.password)
             ptz = camera.create_ptz_service()
             profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
-            # Validate exists
             try:
                 presets = ptz.GetPresets({'ProfileToken': profile_token})
                 if not any(getattr(p, 'token', None) == request.preset_token for p in presets):
@@ -678,27 +746,71 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             context.set_details(f"Failed to create preset: {e}")
             return onvif_pb2.CreatePresetResponse(success=False, message=f"Failed to create preset: {e}")
 
+    # ============================================================================
+    # Preset Tour Methods - Unified Interface
+    # ============================================================================
+
     def GetPresetTours(self, request, context):
-        """Get all preset tours for the camera."""
+        """Get all preset tours - works with both native and manual tours."""
         try:
             camera = self._get_camera(request.device_url, request.username, request.password)
-            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            camera_key = self._get_camera_key(request.device_url, request.username)
+            has_native_support = self._check_native_preset_tour_support(camera, request.device_url, request.username)
             
-            # Get tours from storage
-            camera_key = f"{request.device_url}:{request.username}"
-            tours = self.preset_tours.get(camera_key, [])
-            
-            # Convert to protobuf format
             pb_tours = []
-            for tour_data in tours:
+            
+            if has_native_support:
+                # Get native tours
+                try:
+                    profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+                    ptz = camera.create_ptz_service()
+                    get_tours_req = ptz.create_type('GetPresetTours')
+                    get_tours_req.ProfileToken = profile_token
+                    native_tours = ptz.GetPresetTours(get_tours_req)
+                    
+                    for native_tour in native_tours:
+                        tour = onvif_pb2.PresetTour(
+                            token=getattr(native_tour, 'token', '') or getattr(native_tour, 'Token', ''),
+                            name=getattr(native_tour, 'Name', 'Native Tour'),
+                            is_running=getattr(native_tour, 'Status', {}).get('State', 'Idle') == 'Running',
+                            auto_start=getattr(native_tour, 'AutoStart', False)
+                        )
+                        
+                        # Add starting condition if available
+                        if hasattr(native_tour, 'StartingCondition'):
+                            condition = onvif_pb2.StartingCondition(
+                                recurring_time=getattr(native_tour.StartingCondition, 'RecurringTime', 0),
+                                recurring_duration=getattr(native_tour.StartingCondition, 'RecurringDuration', 'PT10S'),
+                                random_preset_order=getattr(native_tour.StartingCondition, 'RandomPresetOrder', False)
+                            )
+                            tour.starting_condition.CopyFrom(condition)
+                        
+                        # Add tour spots/steps
+                        if hasattr(native_tour, 'TourSpot'):
+                            for spot in native_tour.TourSpot:
+                                step = onvif_pb2.TourStep(
+                                    preset_token=getattr(spot, 'PresetDetail', {}).get('PresetToken', ''),
+                                    speed=getattr(spot, 'Speed', {}).get('x', 0.5),
+                                    wait_time=int(getattr(spot, 'StayTime', 'PT10S').replace('PT', '').replace('S', ''))
+                                )
+                                tour.steps.append(step)
+                        
+                        pb_tours.append(tour)
+                    
+                    logger.info(f"Retrieved {len(pb_tours)} native preset tours")
+                except Exception as e:
+                    logger.warning(f"Failed to get native tours: {e}")
+            
+            # Also include manual tours if any exist
+            manual_tours = self.preset_tours.get(camera_key, [])
+            for tour_data in manual_tours:
                 tour = onvif_pb2.PresetTour(
                     token=tour_data['token'],
-                    name=tour_data['name'],
+                    name=tour_data['name'] + " (Manual)",
                     is_running=tour_data.get('is_running', False),
                     auto_start=tour_data.get('auto_start', False)
                 )
                 
-                # Add starting condition
                 if 'starting_condition' in tour_data:
                     condition = onvif_pb2.StartingCondition(
                         recurring_time=tour_data['starting_condition']['recurring_time'],
@@ -707,7 +819,6 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                     )
                     tour.starting_condition.CopyFrom(condition)
                 
-                # Add tour steps
                 for step_data in tour_data['steps']:
                     step = onvif_pb2.TourStep(
                         preset_token=step_data['preset_token'],
@@ -718,7 +829,7 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                 
                 pb_tours.append(tour)
             
-            logger.info(f"Returning {len(pb_tours)} preset tours for camera")
+            logger.info(f"Returning {len(pb_tours)} total preset tours")
             return onvif_pb2.GetPresetToursResponse(tours=pb_tours)
             
         except Exception as e:
@@ -727,43 +838,19 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             return onvif_pb2.GetPresetToursResponse()
 
     def CreatePresetTour(self, request, context):
-        """Create a new preset tour."""
+        """Create a preset tour - uses native if supported, otherwise manual."""
         try:
             camera = self._get_camera(request.device_url, request.username, request.password)
-            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            camera_key = self._get_camera_key(request.device_url, request.username)
+            has_native_support = self._check_native_preset_tour_support(camera, request.device_url, request.username)
             
-            # Generate a new tour token
-            camera_key = f"{request.device_url}:{request.username}"
-            if camera_key not in self.preset_tours:
-                self.preset_tours[camera_key] = []
-            
-            new_token = f"Tour_{len(self.preset_tours[camera_key]) + 1}"
-            
-            # Create new tour
-            new_tour = {
-                'token': new_token,
-                'name': request.tour_name or f"Tour_{len(self.preset_tours[camera_key]) + 1}",
-                'steps': [],
-                'is_running': False,
-                'manual_loop_thread': None,
-                'stop_manual_loop': False,
-                'auto_start': request.auto_start if hasattr(request, 'auto_start') else False,
-                'starting_condition': {
-                    'recurring_time': request.starting_condition.recurring_time if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 0,
-                    'recurring_duration': request.starting_condition.recurring_duration if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 'PT10S',
-                    'random_preset_order': request.starting_condition.random_preset_order if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else False
-                }
-            }
-            
-            self.preset_tours[camera_key].append(new_tour)
-            
-            logger.info(f"Created new preset tour: {new_tour['name']} with token: {new_token}")
-            return onvif_pb2.CreatePresetTourResponse(
-                success=True,
-                message="Preset tour created successfully",
-                tour_token=new_token
-            )
-            
+            if has_native_support:
+                logger.info("Creating native ONVIF preset tour")
+                return self._create_native_tour(request, context, camera)
+            else:
+                logger.info("Creating manual preset tour (native not supported)")
+                return self._create_manual_tour(request, context, camera_key)
+                
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Failed to create preset tour: {e}")
@@ -773,56 +860,30 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             )
 
     def ModifyPresetTour(self, request, context):
-        """Modify a preset tour with new steps."""
+        """Modify a preset tour - handles both native and manual tours."""
         try:
             camera = self._get_camera(request.device_url, request.username, request.password)
-            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            camera_key = self._get_camera_key(request.device_url, request.username)
+            has_native_support = self._check_native_preset_tour_support(camera, request.device_url, request.username)
             
-            # Find the tour
-            camera_key = f"{request.device_url}:{request.username}"
-            tours = self.preset_tours.get(camera_key, [])
+            # Check if it's a manual tour
+            manual_tours = self.preset_tours.get(camera_key, [])
+            is_manual_tour = any(t['token'] == request.tour_token for t in manual_tours)
             
-            tour_found = False
-            for tour_data in tours:
-                if tour_data['token'] == request.tour_token:
-                    tour_found = True
-                    
-                    # Update the steps
-                    tour_data['steps'] = []
-                    for step in request.steps:
-                        step_data = {
-                            'preset_token': step.preset_token,
-                            'speed': step.speed,
-                            'wait_time': step.wait_time
-                        }
-                        tour_data['steps'].append(step_data)
-                        logger.info(f"Added step - Preset: {step.preset_token}, Speed: {step.speed}, Wait: {step.wait_time}s")
-                    
-                    # Update auto_start and starting_condition if provided
-                    if hasattr(request, 'auto_start'):
-                        tour_data['auto_start'] = request.auto_start
-                    
-                    if hasattr(request, 'starting_condition') and request.HasField('starting_condition'):
-                        tour_data['starting_condition'] = {
-                            'recurring_time': request.starting_condition.recurring_time,
-                            'recurring_duration': request.starting_condition.recurring_duration,
-                            'random_preset_order': request.starting_condition.random_preset_order
-                        }
-                    break
-            
-            if not tour_found:
+            if is_manual_tour:
+                logger.info(f"Modifying manual preset tour: {request.tour_token}")
+                return self._modify_manual_tour(request, context, camera_key)
+            elif has_native_support:
+                logger.info(f"Modifying native preset tour: {request.tour_token}")
+                return self._modify_native_tour(request, context, camera)
+            else:
                 context.set_code(grpc.StatusCode.NOT_FOUND)
-                context.set_details("Tour token not found")
+                context.set_details("Tour not found")
                 return onvif_pb2.ModifyPresetTourResponse(
                     success=False,
-                    message="Tour token not found"
+                    message="Tour not found"
                 )
-            
-            return onvif_pb2.ModifyPresetTourResponse(
-                success=True,
-                message="Preset tour modified successfully"
-            )
-            
+                
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Failed to modify preset tour: {e}")
@@ -832,100 +893,30 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             )
 
     def OperatePresetTour(self, request, context):
-        """Operate a preset tour (start/stop/pause/resume)."""
+        """Operate a preset tour - handles both native and manual tours."""
         try:
             camera = self._get_camera(request.device_url, request.username, request.password)
-            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            camera_key = self._get_camera_key(request.device_url, request.username)
+            has_native_support = self._check_native_preset_tour_support(camera, request.device_url, request.username)
             
-            # Find the tour
-            camera_key = f"{request.device_url}:{request.username}"
-            tours = self.preset_tours.get(camera_key, [])
+            # Check if it's a manual tour
+            manual_tours = self.preset_tours.get(camera_key, [])
+            is_manual_tour = any(t['token'] == request.tour_token for t in manual_tours)
             
-            tour_found = False
-            for tour_data in tours:
-                if tour_data['token'] == request.tour_token:
-                    tour_found = True
-                    
-                    if request.operation.lower() == "start":
-                        if tour_data['is_running']:
-                            return onvif_pb2.OperatePresetTourResponse(
-                                success=False,
-                                message="Tour is already running"
-                            )
-                        
-                        tour_data['is_running'] = True
-                        tour_data['stop_manual_loop'] = False
-                        
-                        # Check if camera supports native patrol
-                        try:
-                            ptz = camera.create_ptz_service()
-                            
-                            # Try to use native preset tour if available
-                            try:
-                                # This would be the native ONVIF preset tour implementation
-                                # For now, we'll use manual loop as most cameras don't support this
-                                raise NotImplementedError("Native preset tour not implemented")
-                                
-                            except (NotImplementedError, Exception):
-                                # Use manual loop fallback
-                                logger.info(f"Camera doesn't support native patrol, using manual loop for tour: {tour_data['name']}")
-                                tour_data['manual_loop_thread'] = threading.Thread(
-                                    target=self._execute_manual_loop,
-                                    args=(camera, tour_data, profile_token),
-                                    daemon=True
-                                )
-                                tour_data['manual_loop_thread'].start()
-                                
-                        except Exception as e:
-                            logger.warning(f"Failed to start native patrol, using manual loop: {e}")
-                            # Use manual loop fallback
-                            tour_data['manual_loop_thread'] = threading.Thread(
-                                target=self._execute_manual_loop,
-                                args=(camera, tour_data, profile_token),
-                                daemon=True
-                            )
-                            tour_data['manual_loop_thread'].start()
-                        
-                    elif request.operation.lower() == "stop":
-                        if not tour_data['is_running']:
-                            return onvif_pb2.OperatePresetTourResponse(
-                                success=False,
-                                message="Tour is not running"
-                            )
-                        
-                        tour_data['is_running'] = False
-                        tour_data['stop_manual_loop'] = True
-                        
-                        # Wait for manual loop thread to finish if it exists
-                        if tour_data['manual_loop_thread'] and tour_data['manual_loop_thread'].is_alive():
-                            logger.info(f"Stopping manual loop for tour: {tour_data['name']}")
-                            tour_data['manual_loop_thread'].join(timeout=5)  # Wait up to 5 seconds
-                        
-                    elif request.operation.lower() in ["pause", "resume"]:
-                        logger.info(f"{request.operation.capitalize()}d tour: {tour_data['name']}")
-                        
-                    else:
-                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                        context.set_details("Invalid operation")
-                        return onvif_pb2.OperatePresetTourResponse(
-                            success=False,
-                            message="Invalid operation"
-                        )
-                    break
-            
-            if not tour_found:
+            if is_manual_tour:
+                logger.info(f"Operating manual preset tour: {request.tour_token}")
+                return self._operate_manual_tour(request, context, camera, camera_key)
+            elif has_native_support:
+                logger.info(f"Operating native preset tour: {request.tour_token}")
+                return self._operate_native_tour(request, context, camera)
+            else:
                 context.set_code(grpc.StatusCode.NOT_FOUND)
-                context.set_details("Tour token not found")
+                context.set_details("Tour not found")
                 return onvif_pb2.OperatePresetTourResponse(
                     success=False,
-                    message="Tour token not found"
+                    message="Tour not found"
                 )
-            
-            return onvif_pb2.OperatePresetTourResponse(
-                success=True,
-                message=f"Tour operation '{request.operation}' completed successfully"
-            )
-            
+                
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Failed to operate preset tour: {e}")
@@ -934,351 +925,274 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                 message=f"Failed to operate preset tour: {e}"
             )
 
-    def CreateNativePresetTour(self, request, context):
-        """Create a native ONVIF preset tour using onvif-zeep."""
+    # ============================================================================
+    # Native Preset Tour Implementation
+    # ============================================================================
+
+    def _create_native_tour(self, request, context, camera):
+        """Create a native ONVIF preset tour."""
         try:
-            camera = self._get_camera(request.device_url, request.username, request.password)
             profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
-            
             ptz = camera.create_ptz_service()
             
-            # Create native ONVIF preset tour
-            try:
-                create_req = ptz.create_type('CreatePresetTour')
-                create_req.ProfileToken = profile_token
-                
-                # Set tour properties
-                preset_tour = {
-                    'AutoStart': request.auto_start if hasattr(request, 'auto_start') else False,
-                    'StartingCondition': {
-                        'RecurringTime': request.starting_condition.recurring_time if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 0,
-                        'RecurringDuration': request.starting_condition.recurring_duration if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 'PT10S',
-                        'RandomPresetOrder': request.starting_condition.random_preset_order if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else False
-                    }
+            create_req = ptz.create_type('CreatePresetTour')
+            create_req.ProfileToken = profile_token
+            
+            preset_tour = {
+                'AutoStart': request.auto_start if hasattr(request, 'auto_start') else False,
+                'StartingCondition': {
+                    'RecurringTime': request.starting_condition.recurring_time if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 0,
+                    'RecurringDuration': request.starting_condition.recurring_duration if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 'PT10S',
+                    'RandomPresetOrder': request.starting_condition.random_preset_order if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else False
                 }
-                
-                # Add tour spots if provided
-                if hasattr(request, 'steps') and request.steps:
-                    tour_spots = []
-                    for step in request.steps:
-                        tour_spot = {
-                            'PresetToken': step.preset_token,
-                            'Speed': {'x': step.speed, 'y': step.speed},
-                            'StayTime': step.wait_time
-                        }
-                        tour_spots.append(tour_spot)
-                    preset_tour['TourSpot'] = tour_spots
-                
-                create_req.PresetTour = preset_tour
-                
-                # Call native ONVIF method
-                result = ptz.CreatePresetTour(create_req)
-                tour_token = result.PresetTourToken if hasattr(result, 'PresetTourToken') else "NativeTour_1"
-                
-                logger.info(f"Created native ONVIF preset tour with token: {tour_token}")
-                logger.info(f"AutoStart: {preset_tour['AutoStart']}, RecurringTime: {preset_tour['StartingCondition']['RecurringTime']}")
-                
-                return onvif_pb2.CreateNativePresetTourResponse(
-                    success=True,
-                    message="Native ONVIF preset tour created successfully",
-                    tour_token=tour_token
-                )
-                
-            except Exception as e:
-                logger.warning(f"Native ONVIF preset tour creation failed: {e}")
-                # Fallback to manual implementation
-                return self._create_fallback_tour(request, context, camera, profile_token)
-                
-        except Exception as e:
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Failed to create native preset tour: {e}")
-            return onvif_pb2.CreateNativePresetTourResponse(
-                success=False,
-                message=f"Failed to create native preset tour: {e}"
-            )
-
-    def ModifyNativePresetTour(self, request, context):
-        """Modify a native ONVIF preset tour using onvif-zeep."""
-        try:
-            camera = self._get_camera(request.device_url, request.username, request.password)
-            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
-            
-            ptz = camera.create_ptz_service()
-            
-            try:
-                modify_req = ptz.create_type('ModifyPresetTour')
-                modify_req.ProfileToken = profile_token
-                modify_req.PresetTour = {
-                    'TourToken': request.tour_token,
-                    'AutoStart': request.auto_start if hasattr(request, 'auto_start') else False,
-                    'StartingCondition': {
-                        'RecurringTime': request.starting_condition.recurring_time if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 0,
-                        'RecurringDuration': request.starting_condition.recurring_duration if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 'PT10S',
-                        'RandomPresetOrder': request.starting_condition.random_preset_order if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else False
-                    }
-                }
-                
-                # Add tour spots if provided
-                if hasattr(request, 'steps') and request.steps:
-                    tour_spots = []
-                    for step in request.steps:
-                        tour_spot = {
-                            'PresetToken': step.preset_token,
-                            'Speed': {'x': step.speed, 'y': step.speed},
-                            'StayTime': step.wait_time
-                        }
-                        tour_spots.append(tour_spot)
-                    modify_req.PresetTour['TourSpot'] = tour_spots
-                
-                # Call native ONVIF method
-                ptz.ModifyPresetTour(modify_req)
-                
-                logger.info(f"Modified native ONVIF preset tour: {request.tour_token}")
-                logger.info(f"AutoStart: {modify_req.PresetTour['AutoStart']}, RecurringTime: {modify_req.PresetTour['StartingCondition']['RecurringTime']}")
-                
-                return onvif_pb2.ModifyNativePresetTourResponse(
-                    success=True,
-                    message="Native ONVIF preset tour modified successfully"
-                )
-                
-            except Exception as e:
-                logger.warning(f"Native ONVIF preset tour modification failed: {e}")
-                # Fallback to manual implementation
-                return self._modify_fallback_tour(request, context, camera, profile_token)
-                
-        except Exception as e:
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Failed to modify native preset tour: {e}")
-            return onvif_pb2.ModifyNativePresetTourResponse(
-                success=False,
-                message=f"Failed to modify native preset tour: {e}"
-            )
-
-    def OperateNativePresetTour(self, request, context):
-        """Operate a native ONVIF preset tour using onvif-zeep."""
-        try:
-            camera = self._get_camera(request.device_url, request.username, request.password)
-            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
-            
-            ptz = camera.create_ptz_service()
-            
-            try:
-                operate_req = ptz.create_type('OperatePresetTour')
-                operate_req.ProfileToken = profile_token
-                operate_req.TourToken = request.tour_token
-                operate_req.Operation = request.operation.capitalize()  # ONVIF expects "Start", "Stop", etc.
-                
-                # Call native ONVIF method
-                ptz.OperatePresetTour(operate_req)
-                
-                logger.info(f"Operated native ONVIF preset tour: {request.tour_token} with operation: {request.operation}")
-                
-                return onvif_pb2.OperateNativePresetTourResponse(
-                    success=True,
-                    message=f"Native ONVIF preset tour operation '{request.operation}' completed successfully"
-                )
-                
-            except Exception as e:
-                logger.warning(f"Native ONVIF preset tour operation failed: {e}")
-                # Fallback to manual implementation
-                return self._operate_fallback_tour(request, context, camera, profile_token)
-                
-        except Exception as e:
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Failed to operate native preset tour: {e}")
-            return onvif_pb2.OperateNativePresetTourResponse(
-                success=False,
-                message=f"Failed to operate native preset tour: {e}"
-            )
-
-    def _create_fallback_tour(self, request, context, camera, profile_token):
-        """Fallback method when native ONVIF preset tour creation fails."""
-        try:
-            # Generate a new tour token
-            camera_key = f"{request.device_url}:{request.username}"
-            if camera_key not in self.preset_tours:
-                self.preset_tours[camera_key] = []
-            
-            new_token = f"FallbackTour_{len(self.preset_tours[camera_key]) + 1}"
-            
-            # Create new tour with fallback implementation
-            new_tour = {
-                'token': new_token,
-                'name': request.tour_name or f"FallbackTour_{len(self.preset_tours[camera_key]) + 1}",
-                'steps': [],
-                'is_running': False,
-                'manual_loop_thread': None,
-                'stop_manual_loop': False,
-                'auto_start': request.auto_start if hasattr(request, 'auto_start') else False,
-                'starting_condition': {
-                    'recurring_time': request.starting_condition.recurring_time if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 0,
-                    'recurring_duration': request.starting_condition.recurring_duration if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 'PT10S',
-                    'random_preset_order': request.starting_condition.random_preset_order if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else False
-                },
-                'fallback': True  # Mark as fallback tour
             }
             
-            # Add steps if provided
             if hasattr(request, 'steps') and request.steps:
+                tour_spots = []
                 for step in request.steps:
-                    step_data = {
-                        'preset_token': step.preset_token,
-                        'speed': step.speed,
-                        'wait_time': step.wait_time
+                    tour_spot = {
+                        'PresetDetail': {'PresetToken': step.preset_token},
+                        'Speed': {'PanTilt': {'x': step.speed, 'y': step.speed}, 'Zoom': {'x': step.speed}},
+                        'StayTime': f'PT{step.wait_time}S'
                     }
-                    new_tour['steps'].append(step_data)
+                    tour_spots.append(tour_spot)
+                preset_tour['TourSpot'] = tour_spots
             
-            self.preset_tours[camera_key].append(new_tour)
+            create_req.PresetTour = preset_tour
+            result = ptz.CreatePresetTour(create_req)
+            tour_token = result if isinstance(result, str) else getattr(result, 'Token', 'NativeTour_1')
             
-            logger.info(f"Created fallback preset tour: {new_tour['name']} with token: {new_token}")
-            
-            return onvif_pb2.CreateNativePresetTourResponse(
+            logger.info(f"Created native preset tour with token: {tour_token}")
+            return onvif_pb2.CreatePresetTourResponse(
                 success=True,
-                message="Fallback preset tour created successfully (native ONVIF not supported)",
-                tour_token=new_token
+                message="Native preset tour created successfully",
+                tour_token=tour_token
             )
             
         except Exception as e:
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Failed to create fallback tour: {e}")
-            return onvif_pb2.CreateNativePresetTourResponse(
-                success=False,
-                message=f"Failed to create fallback tour: {e}"
-            )
+            logger.error(f"Failed to create native tour: {e}")
+            raise
 
-    def _modify_fallback_tour(self, request, context, camera, profile_token):
-        """Fallback method when native ONVIF preset tour modification fails."""
+    def _modify_native_tour(self, request, context, camera):
+        """Modify a native ONVIF preset tour."""
         try:
-            # Find the tour in fallback storage
-            camera_key = f"{request.device_url}:{request.username}"
-            tours = self.preset_tours.get(camera_key, [])
+            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            ptz = camera.create_ptz_service()
             
-            tour_found = False
-            for tour_data in tours:
-                if tour_data['token'] == request.tour_token:
-                    tour_found = True
-                    
-                    # Update the steps
-                    if hasattr(request, 'steps') and request.steps:
-                        tour_data['steps'] = []
-                        for step in request.steps:
-                            step_data = {
-                                'preset_token': step.preset_token,
-                                'speed': step.speed,
-                                'wait_time': step.wait_time
-                            }
-                            tour_data['steps'].append(step_data)
-                    
-                    # Update auto_start and starting_condition
-                    if hasattr(request, 'auto_start'):
-                        tour_data['auto_start'] = request.auto_start
-                    
-                    if hasattr(request, 'starting_condition') and request.HasField('starting_condition'):
-                        tour_data['starting_condition'] = {
-                            'recurring_time': request.starting_condition.recurring_time,
-                            'recurring_duration': request.starting_condition.recurring_duration,
-                            'random_preset_order': request.starting_condition.random_preset_order
+            modify_req = ptz.create_type('ModifyPresetTour')
+            modify_req.ProfileToken = profile_token
+            
+            preset_tour = {
+                'Token': request.tour_token,
+                'AutoStart': request.auto_start if hasattr(request, 'auto_start') else False,
+                'StartingCondition': {
+                    'RecurringTime': request.starting_condition.recurring_time if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 0,
+                    'RecurringDuration': request.starting_condition.recurring_duration if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 'PT10S',
+                    'RandomPresetOrder': request.starting_condition.random_preset_order if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else False
+                }
+            }
+            
+            if hasattr(request, 'steps') and request.steps:
+                tour_spots = []
+                for step in request.steps:
+                    tour_spot = {
+                        'PresetDetail': {'PresetToken': step.preset_token},
+                        'Speed': {'PanTilt': {'x': step.speed, 'y': step.speed}, 'Zoom': {'x': step.speed}},
+                        'StayTime': f'PT{step.wait_time}S'
+                    }
+                    tour_spots.append(tour_spot)
+                preset_tour['TourSpot'] = tour_spots
+            
+            modify_req.PresetTour = preset_tour
+            ptz.ModifyPresetTour(modify_req)
+            
+            logger.info(f"Modified native preset tour: {request.tour_token}")
+            return onvif_pb2.ModifyPresetTourResponse(
+                success=True,
+                message="Native preset tour modified successfully"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to modify native tour: {e}")
+            raise
+
+    def _operate_native_tour(self, request, context, camera):
+        """Operate a native ONVIF preset tour."""
+        try:
+            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            ptz = camera.create_ptz_service()
+            
+            operate_req = ptz.create_type('OperatePresetTour')
+            operate_req.ProfileToken = profile_token
+            operate_req.PresetTourToken = request.tour_token
+            operate_req.Operation = request.operation.capitalize()
+            
+            ptz.OperatePresetTour(operate_req)
+            
+            logger.info(f"Operated native preset tour: {request.tour_token} with operation: {request.operation}")
+            return onvif_pb2.OperatePresetTourResponse(
+                success=True,
+                message=f"Native preset tour operation '{request.operation}' completed successfully"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to operate native tour: {e}")
+            raise
+
+    # ============================================================================
+    # Manual Preset Tour Implementation
+    # ============================================================================
+
+    def _create_manual_tour(self, request, context, camera_key):
+        """Create a manual preset tour when native support is unavailable."""
+        if camera_key not in self.preset_tours:
+            self.preset_tours[camera_key] = []
+        
+        new_token = f"ManualTour_{len(self.preset_tours[camera_key]) + 1}"
+        
+        new_tour = {
+            'token': new_token,
+            'name': request.tour_name or f"Manual Tour {len(self.preset_tours[camera_key]) + 1}",
+            'steps': [],
+            'is_running': False,
+            'manual_loop_thread': None,
+            'stop_manual_loop': False,
+            'auto_start': request.auto_start if hasattr(request, 'auto_start') else False,
+            'starting_condition': {
+                'recurring_time': request.starting_condition.recurring_time if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 0,
+                'recurring_duration': request.starting_condition.recurring_duration if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else 'PT10S',
+                'random_preset_order': request.starting_condition.random_preset_order if hasattr(request, 'starting_condition') and request.HasField('starting_condition') else False
+            }
+        }
+        
+        # Add steps if provided
+        if hasattr(request, 'steps') and request.steps:
+            for step in request.steps:
+                step_data = {
+                    'preset_token': step.preset_token,
+                    'speed': step.speed,
+                    'wait_time': step.wait_time
+                }
+                new_tour['steps'].append(step_data)
+        
+        self.preset_tours[camera_key].append(new_tour)
+        
+        logger.info(f"Created manual preset tour: {new_tour['name']} with token: {new_token}")
+        return onvif_pb2.CreatePresetTourResponse(
+            success=True,
+            message="Manual preset tour created successfully",
+            tour_token=new_token
+        )
+
+    def _modify_manual_tour(self, request, context, camera_key):
+        """Modify a manual preset tour."""
+        tours = self.preset_tours.get(camera_key, [])
+        
+        for tour_data in tours:
+            if tour_data['token'] == request.tour_token:
+                # Update steps if provided
+                if hasattr(request, 'steps') and request.steps:
+                    tour_data['steps'] = []
+                    for step in request.steps:
+                        step_data = {
+                            'preset_token': step.preset_token,
+                            'speed': step.speed,
+                            'wait_time': step.wait_time
                         }
-                    break
-            
-            if not tour_found:
-                context.set_code(grpc.StatusCode.NOT_FOUND)
-                context.set_details("Tour token not found")
-                return onvif_pb2.ModifyNativePresetTourResponse(
-                    success=False,
-                    message="Fallback tour token not found"
+                        tour_data['steps'].append(step_data)
+                        logger.info(f"Added step - Preset: {step.preset_token}, Speed: {step.speed}, Wait: {step.wait_time}s")
+                
+                # Update auto_start and starting_condition
+                if hasattr(request, 'auto_start'):
+                    tour_data['auto_start'] = request.auto_start
+                
+                if hasattr(request, 'starting_condition') and request.HasField('starting_condition'):
+                    tour_data['starting_condition'] = {
+                        'recurring_time': request.starting_condition.recurring_time,
+                        'recurring_duration': request.starting_condition.recurring_duration,
+                        'random_preset_order': request.starting_condition.random_preset_order
+                    }
+                
+                logger.info(f"Modified manual preset tour: {request.tour_token}")
+                return onvif_pb2.ModifyPresetTourResponse(
+                    success=True,
+                    message="Manual preset tour modified successfully"
                 )
-            
-            logger.info(f"Modified fallback preset tour: {request.tour_token}")
-            
-            return onvif_pb2.ModifyNativePresetTourResponse(
-                success=True,
-                message="Fallback preset tour modified successfully"
-            )
-            
-        except Exception as e:
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Failed to modify fallback tour: {e}")
-            return onvif_pb2.ModifyNativePresetTourResponse(
-                success=False,
-                message=f"Failed to modify fallback tour: {e}"
-            )
+        
+        context.set_code(grpc.StatusCode.NOT_FOUND)
+        context.set_details("Manual tour not found")
+        return onvif_pb2.ModifyPresetTourResponse(
+            success=False,
+            message="Manual tour not found"
+        )
 
-    def _operate_fallback_tour(self, request, context, camera, profile_token):
-        """Fallback method when native ONVIF preset tour operation fails."""
-        try:
-            # Find the tour in fallback storage
-            camera_key = f"{request.device_url}:{request.username}"
-            tours = self.preset_tours.get(camera_key, [])
-            
-            tour_found = False
-            for tour_data in tours:
-                if tour_data['token'] == request.tour_token:
-                    tour_found = True
-                    
-                    if request.operation.lower() == "start":
-                        if tour_data['is_running']:
-                            return onvif_pb2.OperateNativePresetTourResponse(
-                                success=False,
-                                message="Fallback tour is already running"
-                            )
-                        
-                        tour_data['is_running'] = True
-                        tour_data['stop_manual_loop'] = False
-                        
-                        # Use manual loop fallback
-                        logger.info(f"Starting fallback manual loop for tour: {tour_data['name']}")
-                        tour_data['manual_loop_thread'] = threading.Thread(
-                            target=self._execute_manual_loop,
-                            args=(camera, tour_data, profile_token),
-                            daemon=True
-                        )
-                        tour_data['manual_loop_thread'].start()
-                        
-                    elif request.operation.lower() == "stop":
-                        if not tour_data['is_running']:
-                            return onvif_pb2.OperateNativePresetTourResponse(
-                                success=False,
-                                message="Fallback tour is not running"
-                            )
-                        
-                        tour_data['is_running'] = False
-                        tour_data['stop_manual_loop'] = True
-                        
-                        # Wait for manual loop thread to finish
-                        if tour_data['manual_loop_thread'] and tour_data['manual_loop_thread'].is_alive():
-                            logger.info(f"Stopping fallback manual loop for tour: {tour_data['name']}")
-                            tour_data['manual_loop_thread'].join(timeout=5)
-                        
-                    elif request.operation.lower() in ["pause", "resume"]:
-                        logger.info(f"{request.operation.capitalize()}d fallback tour: {tour_data['name']}")
-                        
-                    else:
-                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                        context.set_details("Invalid operation")
-                        return onvif_pb2.OperateNativePresetTourResponse(
+    def _operate_manual_tour(self, request, context, camera, camera_key):
+        """Operate a manual preset tour."""
+        tours = self.preset_tours.get(camera_key, [])
+        
+        for tour_data in tours:
+            if tour_data['token'] == request.tour_token:
+                profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+                
+                if request.operation.lower() == "start":
+                    if tour_data['is_running']:
+                        return onvif_pb2.OperatePresetTourResponse(
                             success=False,
-                            message="Invalid fallback tour operation"
+                            message="Manual tour is already running"
                         )
-                    break
-            
-            if not tour_found:
-                context.set_code(grpc.StatusCode.NOT_FOUND)
-                context.set_details("Tour token not found")
-                return onvif_pb2.OperateNativePresetTourResponse(
-                    success=False,
-                    message="Fallback tour token not found"
+                    
+                    tour_data['is_running'] = True
+                    tour_data['stop_manual_loop'] = False
+                    
+                    logger.info(f"Starting manual loop for tour: {tour_data['name']}")
+                    tour_data['manual_loop_thread'] = threading.Thread(
+                        target=self._execute_manual_loop,
+                        args=(camera, tour_data, profile_token),
+                        daemon=True
+                    )
+                    tour_data['manual_loop_thread'].start()
+                    
+                elif request.operation.lower() == "stop":
+                    if not tour_data['is_running']:
+                        return onvif_pb2.OperatePresetTourResponse(
+                            success=False,
+                            message="Manual tour is not running"
+                        )
+                    
+                    tour_data['is_running'] = False
+                    tour_data['stop_manual_loop'] = True
+                    
+                    if tour_data['manual_loop_thread'] and tour_data['manual_loop_thread'].is_alive():
+                        logger.info(f"Stopping manual loop for tour: {tour_data['name']}")
+                        tour_data['manual_loop_thread'].join(timeout=5)
+                    
+                elif request.operation.lower() in ["pause", "resume"]:
+                    logger.info(f"{request.operation.capitalize()}d manual tour: {tour_data['name']}")
+                    
+                else:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details("Invalid operation")
+                    return onvif_pb2.OperatePresetTourResponse(
+                        success=False,
+                        message="Invalid operation"
+                    )
+                
+                return onvif_pb2.OperatePresetTourResponse(
+                    success=True,
+                    message=f"Manual tour operation '{request.operation}' completed successfully"
                 )
-            
-            return onvif_pb2.OperateNativePresetTourResponse(
-                success=True,
-                message=f"Fallback tour operation '{request.operation}' completed successfully"
-            )
-            
-        except Exception as e:
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Failed to operate fallback tour: {e}")
-            return onvif_pb2.OperateNativePresetTourResponse(
-                success=False,
-                message=f"Failed to operate fallback tour: {e}"
-            )
+        
+        context.set_code(grpc.StatusCode.NOT_FOUND)
+        context.set_details("Manual tour not found")
+        return onvif_pb2.OperatePresetTourResponse(
+            success=False,
+            message="Manual tour not found"
+        )
+
+    
+        """
+        Legacy method - now redirects to OperatePresetTour which auto-detects support.
+        Kept for backward compatibility.
+        """
+        logger.warning("OperateNativePresetTour is deprecated, use OperatePresetTour instead")
+        return self.OperatePresetTour(request, context)

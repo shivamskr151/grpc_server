@@ -12,12 +12,24 @@ service OnvifService {
   rpc RelativeMove(RelativeMoveRequest) returns (RelativeMoveResponse);
   rpc ContinuousMove(ContinuousMoveRequest) returns (ContinuousMoveResponse);
   rpc Stop(StopRequest) returns (StopResponse);
+  rpc GetPTZStatus(GetPTZStatusRequest) returns (GetPTZStatusResponse);
   rpc GetPresets(GetPresetsRequest) returns (GetPresetsResponse);
   rpc GotoPreset(GotoPresetRequest) returns (GotoPresetResponse);
   rpc SetPreset(SetPresetRequest) returns (SetPresetResponse);
   // Create a preset with optional desired position/speed; server auto-generates name if empty
   rpc CreatePreset(CreatePresetRequest) returns (CreatePresetResponse);
   rpc RemovePreset(RemovePresetRequest) returns (RemovePresetResponse);
+  
+  // PTZ Patrol/Preset Tour
+  rpc GetPresetTours(GetPresetToursRequest) returns (GetPresetToursResponse);
+  rpc CreatePresetTour(CreatePresetTourRequest) returns (CreatePresetTourResponse);
+  rpc ModifyPresetTour(ModifyPresetTourRequest) returns (ModifyPresetTourResponse);
+  rpc OperatePresetTour(OperatePresetTourRequest) returns (OperatePresetTourResponse);
+  
+  // Native ONVIF Preset Tour API
+  rpc CreateNativePresetTour(CreateNativePresetTourRequest) returns (CreateNativePresetTourResponse);
+  rpc ModifyNativePresetTour(ModifyNativePresetTourRequest) returns (ModifyNativePresetTourResponse);
+  rpc OperateNativePresetTour(OperateNativePresetTourRequest) returns (OperateNativePresetTourResponse);
 }
 
 // ========================
@@ -51,6 +63,7 @@ message GetCapabilitiesResponse {
   bool imaging_support = 2;
   bool media_support = 3;
   bool events_support = 4;
+  bool ptz_preset_tour_support = 5;
 }
 
 // ========================
@@ -79,7 +92,7 @@ message GetStreamUriRequest {
   string device_url = 1;
   string username = 2;
   string password = 3;
-  string profile_token = 4;
+  optional string profile_token = 4;
   string stream_type = 5;
 }
 
@@ -114,7 +127,7 @@ message AbsoluteMoveRequest {
   string device_url = 1;
   string username = 2;
   string password = 3;
-  string profile_token = 4;
+  optional string profile_token = 4;
   PanTilt pan_tilt = 5;
   Zoom zoom = 6;
 }
@@ -128,7 +141,7 @@ message RelativeMoveRequest {
   string device_url = 1;
   string username = 2;
   string password = 3;
-  string profile_token = 4;
+  optional string profile_token = 4;
   PanTilt pan_tilt = 5;
   Zoom zoom = 6;
 }
@@ -142,7 +155,7 @@ message ContinuousMoveRequest {
   string device_url = 1;
   string username = 2;
   string password = 3;
-  string profile_token = 4;
+  optional string profile_token = 4;
   PanTilt pan_tilt = 5;
   Zoom zoom = 6;
   int32 timeout = 7;
@@ -157,7 +170,7 @@ message StopRequest {
   string device_url = 1;
   string username = 2;
   string password = 3;
-  string profile_token = 4;
+  optional string profile_token = 4;
   bool pan_tilt = 5;
   bool zoom = 6;
 }
@@ -168,13 +181,31 @@ message StopResponse {
 }
 
 // ========================
+// PTZ Status
+// ========================
+message GetPTZStatusRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+}
+
+message GetPTZStatusResponse {
+  bool success = 1;
+  string message = 2;
+  PanTilt pan_tilt = 3;
+  Zoom zoom = 4;
+  bool moving = 5;
+}
+
+// ========================
 // Presets
 // ========================
 message GetPresetsRequest {
   string device_url = 1;
   string username = 2;
   string password = 3;
-  string profile_token = 4;
+  optional string profile_token = 4;
 }
 
 message Preset {
@@ -192,7 +223,7 @@ message GotoPresetRequest {
   string device_url = 1;
   string username = 2;
   string password = 3;
-  string profile_token = 4;
+  optional string profile_token = 4;
   string preset_token = 5;
   PanTilt pan_tilt_speed = 6;
   Zoom zoom_speed = 7;
@@ -207,7 +238,7 @@ message SetPresetRequest {
   string device_url = 1;
   string username = 2;
   string password = 3;
-  string profile_token = 4;
+  optional string profile_token = 4;
   string preset_name = 5;
 }
 
@@ -222,7 +253,7 @@ message CreatePresetRequest {
   string device_url = 1;
   string username = 2;
   string password = 3;
-  string profile_token = 4;
+  optional string profile_token = 4;
   PanTilt pan_tilt = 5; // desired position/speed (optional)
   Zoom zoom = 6;        // desired position/speed (optional)
 }
@@ -237,11 +268,142 @@ message RemovePresetRequest {
   string device_url = 1;
   string username = 2;
   string password = 3;
-  string profile_token = 4;
+  optional string profile_token = 4;
   string preset_token = 5;
 }
 
 message RemovePresetResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ========================
+// PTZ Patrol/Preset Tour
+// ========================
+message GetPresetToursRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+}
+
+message StartingCondition {
+  int32 recurring_time = 1;        // 0 = infinite loop, >0 = number of cycles
+  string recurring_duration = 2;   // ISO 8601 duration (e.g., "PT10S" for 10 seconds)
+  bool random_preset_order = 3;    // Randomize preset order
+}
+
+message PresetTour {
+  string token = 1;
+  string name = 2;
+  repeated TourStep steps = 3;
+  bool is_running = 4;
+  bool auto_start = 5;             // Auto-start the tour
+  StartingCondition starting_condition = 6;
+}
+
+message GetPresetToursResponse {
+  repeated PresetTour tours = 1;
+}
+
+message CreatePresetTourRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string tour_name = 5;
+  bool auto_start = 6;             // Auto-start the tour
+  StartingCondition starting_condition = 7;
+}
+
+message CreatePresetTourResponse {
+  bool success = 1;
+  string message = 2;
+  string tour_token = 3;
+}
+
+message TourStep {
+  string preset_token = 1;
+  float speed = 2;
+  int32 wait_time = 3; // seconds
+}
+
+message ModifyPresetTourRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string tour_token = 5;
+  repeated TourStep steps = 6;
+  bool auto_start = 7;             // Auto-start the tour
+  StartingCondition starting_condition = 8;
+}
+
+message ModifyPresetTourResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message OperatePresetTourRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string tour_token = 5;
+  string operation = 6; // "start", "stop", "pause", "resume"
+}
+
+message OperatePresetTourResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ========================
+// Native ONVIF Preset Tour API
+// ========================
+message CreateNativePresetTourRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string tour_name = 5;
+  bool auto_start = 6;
+  StartingCondition starting_condition = 7;
+  repeated TourStep steps = 8;
+}
+
+message CreateNativePresetTourResponse {
+  bool success = 1;
+  string message = 2;
+  string tour_token = 3;
+}
+
+message ModifyNativePresetTourRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string tour_token = 5;
+  bool auto_start = 6;
+  StartingCondition starting_condition = 7;
+  repeated TourStep steps = 8;
+}
+
+message ModifyNativePresetTourResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message OperateNativePresetTourRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string tour_token = 5;
+  string operation = 6; // "start", "stop", "pause", "resume"
+}
+
+message OperateNativePresetTourResponse {
   bool success = 1;
   string message = 2;
 }

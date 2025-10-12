@@ -95,6 +95,28 @@ fi
 echo "✅ gRPC Python files generated."
 
 # -----------------------------
-# 6. Start gRPC server
+# 6. Load environment variables from .env file if it exists
 # -----------------------------
+if [ -f ".env" ]; then
+    echo "📄 Loading environment variables from .env file..."
+    export $(cat .env | grep -v '^#' | xargs)
+fi
+
+# Set default environment variables if not set
+export GRPC_PORT=${GRPC_PORT:-50051}
+export GRPC_HOST=${GRPC_HOST:-0.0.0.0}
+export SERVICE_TYPE=${SERVICE_TYPE:-demo}
+export LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+# -----------------------------
+# 7. Start gRPC server
+# -----------------------------
+echo "🚀 Starting ONVIF gRPC Server..."
+echo "Configuration:"
+echo "  - Service Type: ${SERVICE_TYPE}"
+echo "  - Host: ${GRPC_HOST}"
+echo "  - Port: ${GRPC_PORT}"
+echo "  - Log Level: ${LOG_LEVEL}"
+echo "  - WSDL Directory: ${ONVIF_WSDL_DIR:-'Auto-detect'}"
+
 exec "$VENV_PYTHON" grpc_server.py

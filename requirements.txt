@@ -3,5 +3,8 @@ grpcio-tools>=1.60.0
 protobuf>=4.25.0
 onvif-zeep==0.2.12
 pymongo>=4.6.1
-
 grpcio-reflection>=1.60.0
+
+# Configuration management
+PyYAML>=6.0
+python-dotenv>=1.0.0

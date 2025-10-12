@@ -127,11 +127,47 @@ npm run start:dev       # serves http://localhost:3000
 
 ## Configuration
 
+The gRPC server now includes a comprehensive configuration system that supports:
+
+- **Configuration files**: YAML or JSON format (see `config.yaml` and `config-examples/`)
+- **Environment variables**: Override any setting (see `env.example`)
+- **Command line arguments**: Override specific settings at runtime
+
+### Quick Configuration
+
+1. **Use default configuration**: The server works out of the box with sensible defaults
+2. **Custom configuration file**: Create `config.yaml` or use `--config` flag
+3. **Environment variables**: Copy `env.example` to `.env` and modify
+4. **Command line**: Use `--port`, `--host`, `--service-type`, etc.
+
+### Configuration Examples
+
+```bash
+# Use demo service (no real cameras needed)
+python grpc_server.py --service-type demo
+
+# Use custom configuration file
+python grpc_server.py --config config-examples/production.yaml
+
+# Override specific settings
+python grpc_server.py --port 8080 --debug
+
+# Show current configuration
+python config_util.py show
+```
+
+### Service Types
+
+- **`demo`**: Mock service for testing (default)
+- **`real`**: Connects to actual ONVIF cameras
+
+For detailed configuration options, see [CONFIGURATION.md](CONFIGURATION.md).
+
+### Legacy Configuration
+
 - gRPC server host/port: configured in `nestjs_client/src/grpc/grpc.module.ts` (defaults to `localhost:50051`).
 - NestJS API port: defaults to `3000` (Nest config).
 - Camera credentials are passed per-request in the REST body.
-
-If you need to change the gRPC bind address or port, update `grpc_server/grpc_server.py`.
 
 ## API endpoints
 
@@ -216,3 +252,6 @@ For NestJS, the client loads the `.proto` directly from `nestjs_client/src/grpc/
 ---
 
 Contributions and issues are welcome. If you add methods to the proto, please update the README examples and endpoint list accordingly.
+
+
+source venv/bin/activate && python -m grpc_tools.protoc --proto_path=proto --python_out=proto --grpc_python_out=proto proto/onvif.proto

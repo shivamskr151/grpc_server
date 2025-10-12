@@ -1,0 +1,373 @@
+syntax = "proto3";
+
+package onvif;
+
+// =============================================================================
+// Common Message Types
+// =============================================================================
+
+message Vector2D {
+  float x = 1;
+  float y = 2;
+}
+
+message Vector1D {
+  float x = 1;
+}
+
+message PanTilt {
+  Vector2D position = 1;
+  Vector2D speed = 2;
+}
+
+message Zoom {
+  Vector1D position = 1;
+  Vector1D speed = 2;
+}
+
+// =============================================================================
+// Device Information
+// =============================================================================
+
+message GetDeviceInformationRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message GetDeviceInformationResponse {
+  string manufacturer = 1;
+  string model = 2;
+  string firmware_version = 3;
+  string serial_number = 4;
+  string hardware_id = 5;
+}
+
+// =============================================================================
+// Capabilities
+// =============================================================================
+
+message GetCapabilitiesRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message GetCapabilitiesResponse {
+  bool ptz_support = 1;
+  bool imaging_support = 2;
+  bool media_support = 3;
+  bool events_support = 4;
+  bool ptz_preset_tour_support = 5;
+}
+
+// =============================================================================
+// Profiles
+// =============================================================================
+
+message GetProfilesRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message Profile {
+  string token = 1;
+  string name = 2;
+  bool is_fixed = 3;
+}
+
+message GetProfilesResponse {
+  repeated Profile profiles = 1;
+}
+
+// =============================================================================
+// Stream URI
+// =============================================================================
+
+message GetStreamUriRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string stream_type = 5; // RTP-Unicast, RTP-Multicast
+}
+
+message GetStreamUriResponse {
+  string uri = 1;
+  string timeout = 2;
+}
+
+// =============================================================================
+// PTZ Movement
+// =============================================================================
+
+message AbsoluteMoveRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  optional PanTilt pan_tilt = 5;
+  optional Zoom zoom = 6;
+}
+
+message AbsoluteMoveResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RelativeMoveRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  optional PanTilt pan_tilt = 5;
+  optional Zoom zoom = 6;
+}
+
+message RelativeMoveResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ContinuousMoveRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  optional PanTilt pan_tilt = 5;
+  optional Zoom zoom = 6;
+  int32 timeout = 7; // in seconds
+}
+
+message ContinuousMoveResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message StopRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  bool pan_tilt = 5;
+  bool zoom = 6;
+}
+
+message StopResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetPTZStatusRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+}
+
+message GetPTZStatusResponse {
+  bool success = 1;
+  string message = 2;
+  PanTilt pan_tilt = 3;
+  Zoom zoom = 4;
+  bool moving = 5;
+}
+
+// =============================================================================
+// Presets
+// =============================================================================
+
+message GetPresetsRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+}
+
+message Preset {
+  string token = 1;
+  string name = 2;
+  PanTilt pan_tilt = 3;
+  Zoom zoom = 4;
+}
+
+message GetPresetsResponse {
+  repeated Preset presets = 1;
+}
+
+message GotoPresetRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string preset_token = 5;
+  optional PanTilt pan_tilt_speed = 6;
+  optional Zoom zoom_speed = 7;
+}
+
+message GotoPresetResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SetPresetRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  optional string preset_name = 5;
+}
+
+message SetPresetResponse {
+  bool success = 1;
+  string message = 2;
+  string preset_token = 3;
+}
+
+message RemovePresetRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string preset_token = 5;
+}
+
+message RemovePresetResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message CreatePresetRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  optional PanTilt pan_tilt = 5;
+  optional Zoom zoom = 6;
+}
+
+message CreatePresetResponse {
+  bool success = 1;
+  string message = 2;
+  string preset_token = 3;
+}
+
+// =============================================================================
+// Preset Tours (Unified - Native/Manual Auto-Detection)
+// =============================================================================
+
+message StartingCondition {
+  int32 recurring_time = 1; // Time interval in seconds
+  string recurring_duration = 2; // ISO 8601 duration format (e.g., PT10S)
+  bool random_preset_order = 3;
+}
+
+message TourStep {
+  string preset_token = 1;
+  float speed = 2; // Speed for movement (0.0 - 1.0)
+  int32 wait_time = 3; // Wait time at preset in seconds
+}
+
+message PresetTour {
+  string token = 1;
+  string name = 2;
+  repeated TourStep steps = 3;
+  bool is_running = 4;
+  bool auto_start = 5;
+  optional StartingCondition starting_condition = 6;
+}
+
+message GetPresetToursRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+}
+
+message GetPresetToursResponse {
+  repeated PresetTour tours = 1;
+}
+
+message CreatePresetTourRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  optional string tour_name = 5;
+  repeated TourStep steps = 6;
+  optional bool auto_start = 7;
+  optional StartingCondition starting_condition = 8;
+}
+
+message CreatePresetTourResponse {
+  bool success = 1;
+  string message = 2;
+  string tour_token = 3;
+}
+
+message ModifyPresetTourRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string tour_token = 5;
+  repeated TourStep steps = 6;
+  optional bool auto_start = 7;
+  optional StartingCondition starting_condition = 8;
+}
+
+message ModifyPresetTourResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message OperatePresetTourRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string tour_token = 5;
+  string operation = 6; // "start", "stop", "pause", "resume"
+}
+
+message OperatePresetTourResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+
+
+// =============================================================================
+// Service Definition
+// =============================================================================
+
+service OnvifService {
+  // Device Information
+  rpc GetDeviceInformation(GetDeviceInformationRequest) returns (GetDeviceInformationResponse);
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  
+  // Media Profiles
+  rpc GetProfiles(GetProfilesRequest) returns (GetProfilesResponse);
+  rpc GetStreamUri(GetStreamUriRequest) returns (GetStreamUriResponse);
+  
+  // PTZ Movement
+  rpc AbsoluteMove(AbsoluteMoveRequest) returns (AbsoluteMoveResponse);
+  rpc RelativeMove(RelativeMoveRequest) returns (RelativeMoveResponse);
+  rpc ContinuousMove(ContinuousMoveRequest) returns (ContinuousMoveResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+  rpc GetPTZStatus(GetPTZStatusRequest) returns (GetPTZStatusResponse);
+  
+  // Presets
+  rpc GetPresets(GetPresetsRequest) returns (GetPresetsResponse);
+  rpc GotoPreset(GotoPresetRequest) returns (GotoPresetResponse);
+  rpc SetPreset(SetPresetRequest) returns (SetPresetResponse);
+  rpc RemovePreset(RemovePresetRequest) returns (RemovePresetResponse);
+  rpc CreatePreset(CreatePresetRequest) returns (CreatePresetResponse);
+  
+  // Preset Tours (Unified - Auto-detects native vs manual)
+  rpc GetPresetTours(GetPresetToursRequest) returns (GetPresetToursResponse);
+  rpc CreatePresetTour(CreatePresetTourRequest) returns (CreatePresetTourResponse);
+  rpc ModifyPresetTour(ModifyPresetTourRequest) returns (ModifyPresetTourResponse);
+  rpc OperatePresetTour(OperatePresetTourRequest) returns (OperatePresetTourResponse);
+}
