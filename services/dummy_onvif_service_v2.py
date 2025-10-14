@@ -245,14 +245,72 @@ class DummyOnvifServiceV2(onvif_pb2_grpc.OnvifServiceServicer):
             self._init_device_if_needed(request.device_url, request.username)
             key = self._get_device_key(request.device_url, request.username)
             
-            velocity_x = request.pan_tilt.position.x if request.HasField('pan_tilt') else 0.0
-            velocity_y = request.pan_tilt.position.y if request.HasField('pan_tilt') else 0.0
+            # For ContinuousMove, use speed field for velocity, not position field
+            if request.HasField('pan_tilt'):
+                if request.pan_tilt.HasField('speed'):
+                    # Use speed field if available
+                    velocity_x = request.pan_tilt.speed.x
+                    velocity_y = request.pan_tilt.speed.y
+                    logger.info(f"ContinuousMove PanTilt velocity (speed): ({velocity_x}, {velocity_y})")
+                else:
+                    # Fallback to position field if speed not provided
+                    velocity_x = request.pan_tilt.position.x
+                    velocity_y = request.pan_tilt.position.y
+                    logger.info(f"ContinuousMove PanTilt velocity (position): ({velocity_x}, {velocity_y})")
+            else:
+                velocity_x = 0.0
+                velocity_y = 0.0
             
-            logger.info(f"ContinuousMove with velocity ({velocity_x}, {velocity_y}), timeout: {request.timeout}s")
+            if request.HasField('zoom'):
+                if request.zoom.HasField('speed'):
+                    # Use speed field if available
+                    velocity_zoom = request.zoom.speed.x
+                    logger.info(f"ContinuousMove Zoom velocity (speed): {velocity_zoom}")
+                else:
+                    # Fallback to position field if speed not provided
+                    velocity_zoom = request.zoom.position.x
+                    logger.info(f"ContinuousMove Zoom velocity (position): {velocity_zoom}")
+            else:
+                velocity_zoom = 0.0
             
+            # Handle timeout intelligently - validate and use safe values
+            timeout_seconds = 0
+            if hasattr(request, 'timeout') and request.timeout > 0:
+                # Cap timeout at reasonable values (max 10 minutes for dummy service)
+                timeout_seconds = min(request.timeout, 600)
+                logger.info(f"ContinuousMove with timeout: {timeout_seconds}s")
+            else:
+                # Default to 60 seconds if no timeout specified
+                timeout_seconds = 60
+                logger.info(f"ContinuousMove with default timeout: {timeout_seconds}s")
+            
+            logger.info(f"ContinuousMove with velocity PanTilt({velocity_x}, {velocity_y}), Zoom({velocity_zoom}), timeout: {timeout_seconds}s")
+            
+            # Simulate continuous movement by updating position based on velocity
             self.ptz_status[key]['moving'] = True
-            if request.timeout > 0:
-                threading.Timer(request.timeout, lambda: self._set_moving_false(key)).start()
+            
+            # Start a background thread to simulate continuous movement
+            def simulate_continuous_movement():
+                start_time = time.time()
+                while time.time() - start_time < timeout_seconds and self.ptz_status[key]['moving']:
+                    # Update position based on velocity (simplified simulation)
+                    self.ptz_status[key]['pan_tilt']['x'] += velocity_x * 0.01  # Small increments
+                    self.ptz_status[key]['pan_tilt']['y'] += velocity_y * 0.01
+                    self.ptz_status[key]['zoom']['x'] += velocity_zoom * 0.01
+                    
+                    # Clamp values to valid ranges
+                    self.ptz_status[key]['pan_tilt']['x'] = max(-1.0, min(1.0, self.ptz_status[key]['pan_tilt']['x']))
+                    self.ptz_status[key]['pan_tilt']['y'] = max(-1.0, min(1.0, self.ptz_status[key]['pan_tilt']['y']))
+                    self.ptz_status[key]['zoom']['x'] = max(0.0, min(1.0, self.ptz_status[key]['zoom']['x']))
+                    
+                    time.sleep(0.1)  # Update every 100ms
+                
+                # Movement completed
+                self.ptz_status[key]['moving'] = False
+                logger.info(f"ContinuousMove simulation completed for {key}")
+            
+            # Start simulation thread
+            threading.Thread(target=simulate_continuous_movement, daemon=True).start()
             
             return onvif_pb2.ContinuousMoveResponse(
                 success=True,

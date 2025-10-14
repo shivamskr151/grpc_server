@@ -106,6 +106,36 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
         """Generate a unique key for camera identification."""
         return f"{device_url}:{username}"
 
+    def _get_ptz_timeout_range(self, camera, profile_token):
+        """Get supported timeout range for PTZ operations from camera."""
+        try:
+            ptz = camera.create_ptz_service()
+            # Try to get PTZ configuration options
+            try:
+                config_options_req = ptz.create_type('GetConfigurationOptions')
+                config_options_req.ConfigurationToken = profile_token
+                config_options = ptz.GetConfigurationOptions(config_options_req)
+                
+                # Look for timeout range in configuration options
+                if hasattr(config_options, 'PTZConfigurationOptions'):
+                    ptz_options = config_options.PTZConfigurationOptions
+                    if hasattr(ptz_options, 'ContinuousMoveTimeoutRange'):
+                        timeout_range = ptz_options.ContinuousMoveTimeoutRange
+                        if hasattr(timeout_range, 'Min') and hasattr(timeout_range, 'Max'):
+                            min_timeout = getattr(timeout_range.Min, 'Seconds', 1)
+                            max_timeout = getattr(timeout_range.Max, 'Seconds', 300)
+                            logger.info(f"Camera supports timeout range: {min_timeout}s - {max_timeout}s")
+                            return min_timeout, max_timeout
+            except Exception as e:
+                logger.debug(f"Could not get PTZ configuration options: {e}")
+            
+            # Fallback: return common safe range
+            return 1, 300  # 1 second to 5 minutes
+            
+        except Exception as e:
+            logger.warning(f"Failed to get PTZ timeout range: {e}")
+            return 1, 300  # Default safe range
+
     def _check_native_preset_tour_support(self, camera, device_url, username) -> bool:
         """
         Check if camera supports native ONVIF preset tours using GetServiceCapabilities.
@@ -506,20 +536,86 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
         try:
             camera = self._get_camera(request.device_url, request.username, request.password)
             ptz = camera.create_ptz_service()
+            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            
             move_request = ptz.create_type('ContinuousMove')
-            move_request.ProfileToken = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            move_request.ProfileToken = profile_token
             # Initialize velocity dictionary
             move_request.Velocity = {}
             
+            # For ContinuousMove, use speed field for velocity, not position field
             if request.HasField('pan_tilt'):
-                move_request.Velocity['PanTilt'] = {'x': request.pan_tilt.position.x, 'y': request.pan_tilt.position.y}
-            if request.HasField('zoom'):
-                move_request.Velocity['Zoom'] = {'x': request.zoom.position.x}
+                if request.pan_tilt.HasField('speed'):
+                    # Use speed field if available
+                    move_request.Velocity['PanTilt'] = {'x': request.pan_tilt.speed.x, 'y': request.pan_tilt.speed.y}
+                    logger.info(f"ContinuousMove PanTilt velocity (speed): ({request.pan_tilt.speed.x}, {request.pan_tilt.speed.y})")
+                else:
+                    # Fallback to position field if speed not provided
+                    move_request.Velocity['PanTilt'] = {'x': request.pan_tilt.position.x, 'y': request.pan_tilt.position.y}
+                    logger.info(f"ContinuousMove PanTilt velocity (position): ({request.pan_tilt.position.x}, {request.pan_tilt.position.y})")
             
-            # Set a very long timeout to override camera's default 10-second timeout
-            # Most cameras have a built-in 10-second timeout, so we set 1 hour (3600 seconds)
-            move_request.Timeout = "PT86400S"
-            ptz.ContinuousMove(move_request)
+            if request.HasField('zoom'):
+                if request.zoom.HasField('speed'):
+                    # Use speed field if available
+                    move_request.Velocity['Zoom'] = {'x': request.zoom.speed.x}
+                    logger.info(f"ContinuousMove Zoom velocity (speed): {request.zoom.speed.x}")
+                else:
+                    # Fallback to position field if speed not provided
+                    move_request.Velocity['Zoom'] = {'x': request.zoom.position.x}
+                    logger.info(f"ContinuousMove Zoom velocity (position): {request.zoom.position.x}")
+            
+            # Get supported timeout range from camera
+            min_timeout, max_timeout = self._get_ptz_timeout_range(camera, profile_token)
+            
+            # Handle timeout intelligently - try different approaches
+            timeout_set = False
+            
+            # First, try using the timeout from the request if provided
+            if hasattr(request, 'timeout') and request.timeout > 0:
+                try:
+                    # Clamp timeout to camera's supported range
+                    timeout_seconds = max(min_timeout, min(request.timeout, max_timeout))
+                    move_request.Timeout = f"PT{timeout_seconds}S"
+                    ptz.ContinuousMove(move_request)
+                    timeout_set = True
+                    logger.info(f"ContinuousMove with timeout: PT{timeout_seconds}S (clamped from {request.timeout}s)")
+                except Exception as timeout_error:
+                    logger.warning(f"Timeout {request.timeout}s not supported: {timeout_error}")
+            
+            # If timeout from request failed or not provided, try safe values within range
+            if not timeout_set:
+                safe_timeouts = [
+                    min(max_timeout, 60),   # 1 minute or max supported
+                    min(max_timeout, 120),  # 2 minutes or max supported  
+                    min(max_timeout, 300)   # 5 minutes or max supported
+                ]
+                # Remove duplicates and ensure they're within range
+                safe_timeouts = [t for t in safe_timeouts if min_timeout <= t <= max_timeout]
+                safe_timeouts = list(dict.fromkeys(safe_timeouts))  # Remove duplicates while preserving order
+                
+                for timeout_seconds in safe_timeouts:
+                    try:
+                        move_request.Timeout = f"PT{timeout_seconds}S"
+                        ptz.ContinuousMove(move_request)
+                        timeout_set = True
+                        logger.info(f"ContinuousMove with safe timeout: PT{timeout_seconds}S")
+                        break
+                    except Exception as timeout_error:
+                        logger.debug(f"Timeout PT{timeout_seconds}S not supported: {timeout_error}")
+                        continue
+            
+            # If all timeout values fail, try without timeout (let camera use default)
+            if not timeout_set:
+                try:
+                    # Remove timeout attribute if it exists
+                    if hasattr(move_request, 'Timeout'):
+                        delattr(move_request, 'Timeout')
+                    ptz.ContinuousMove(move_request)
+                    logger.info("ContinuousMove without timeout (using camera default)")
+                except Exception as no_timeout_error:
+                    logger.error(f"ContinuousMove failed even without timeout: {no_timeout_error}")
+                    raise no_timeout_error
+            
             return onvif_pb2.ContinuousMoveResponse(success=True, message="Continuous move command sent successfully")
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)

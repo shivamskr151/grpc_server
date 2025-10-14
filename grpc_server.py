@@ -48,11 +48,17 @@ def serve():
 
     # Register service based on configuration
     if config.service_type == "real":
+        from services.onvif_service_v2 import OnvifService
         onvif_service = OnvifService()
-        service_name = "OnvifService"
+        service_name = "OnvifService (Real)"
+    elif config.service_type == "demo":
+        from services.demo_onvif_service import DemoOnvifService
+        onvif_service = DemoOnvifService()
+        service_name = "DemoOnvifService"
     else:
-        onvif_service = OnvifService()
-        service_name = "OnvifService"
+        from services.dummy_onvif_service_v2 import DummyOnvifServiceV2
+        onvif_service = DummyOnvifServiceV2()
+        service_name = "DummyOnvifServiceV2"
     
     onvif_pb2_grpc.add_OnvifServiceServicer_to_server(onvif_service, server)
     logger.info(f"Registered {service_name}")
