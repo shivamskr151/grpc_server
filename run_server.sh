@@ -95,7 +95,7 @@ fi
 "$VENV_PYTHON" -m grpc_tools.protoc -I./proto --python_out=./proto --grpc_python_out=./proto ./proto/onvif_v2.proto
 
 # Fix import paths in generated files
-sed -i '' 's/import onvif_v2_pb2 as onvif__v2__pb2/from . import onvif_v2_pb2 as onvif__v2__pb2/' ./proto/onvif_v2_pb2_grpc.py
+sed -i 's/import onvif_v2_pb2 as onvif__v2__pb2/from . import onvif_v2_pb2 as onvif__v2__pb2/' ./proto/onvif_v2_pb2_grpc.py
 
 echo "✅ gRPC Python files generated."
 
@@ -110,7 +110,7 @@ fi
 # Set default environment variables if not set
 export GRPC_PORT=${GRPC_PORT:-50051}
 export GRPC_HOST=${GRPC_HOST:-0.0.0.0}
-export SERVICE_TYPE=${SERVICE_TYPE:-demo}
+export SERVICE_TYPE=${SERVICE_TYPE:-real}
 export LOG_LEVEL=${LOG_LEVEL:-INFO}
 
 # -----------------------------

@@ -80,7 +80,7 @@ class AppConfig:
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     
     # Service selection
-    service_type: str = "demo"  # "demo" or "real"
+    service_type: str = "real"  # "demo" or "real"
     
     # Development settings
     debug: bool = False

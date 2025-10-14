@@ -47,9 +47,9 @@ def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=config.server.max_workers))
 
     # Register service based on configuration
-    if config.service_type == "demo":
-        onvif_service = DummyOnvifServiceV2()
-        service_name = "DummyOnvifServiceV2"
+    if config.service_type == "real":
+        onvif_service = OnvifService()
+        service_name = "OnvifService"
     else:
         onvif_service = OnvifService()
         service_name = "OnvifService"
