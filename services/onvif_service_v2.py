@@ -90,8 +90,11 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             return self.cameras[key]
         
         if self._wsdl_dir:
+            print(f"Using WSDL directory: {self._wsdl_dir}")
+            print(f"Host: {host}, Port: {port}, Username: {username}, Password: {password}")
             camera = ONVIFCamera(host, port, username, password, wsdl_dir=self._wsdl_dir)
         else:
+            print("No WSDL directory found, using default")
             camera = ONVIFCamera(host, port, username, password)
         
         if config.onvif.enable_caching:
