@@ -476,13 +476,17 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             ptz = camera.create_ptz_service()
             move_request = ptz.create_type('ContinuousMove')
             move_request.ProfileToken = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            # Initialize velocity dictionary
+            move_request.Velocity = {}
+            
             if request.HasField('pan_tilt'):
-                move_request.Velocity = {'PanTilt': {'x': request.pan_tilt.position.x, 'y': request.pan_tilt.position.y}}
+                move_request.Velocity['PanTilt'] = {'x': request.pan_tilt.position.x, 'y': request.pan_tilt.position.y}
             if request.HasField('zoom'):
-                move_request.Velocity = getattr(move_request, 'Velocity', {})
                 move_request.Velocity['Zoom'] = {'x': request.zoom.position.x}
-            if request.timeout > 0:
-                move_request.Timeout = f"PT{request.timeout}S"
+            
+            # Set a very long timeout to override camera's default 10-second timeout
+            # Most cameras have a built-in 10-second timeout, so we set 1 hour (3600 seconds)
+            move_request.Timeout = "PT86400S"
             ptz.ContinuousMove(move_request)
             return onvif_pb2.ContinuousMoveResponse(success=True, message="Continuous move command sent successfully")
         except Exception as e:
