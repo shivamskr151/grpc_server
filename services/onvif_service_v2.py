@@ -746,6 +746,89 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             context.set_details(f"Failed to create preset: {e}")
             return onvif_pb2.CreatePresetResponse(success=False, message=f"Failed to create preset: {e}")
 
+    def UpdatePreset(self, request, context):
+        """Update an existing preset with new name, position, or zoom."""
+        try:
+            camera = self._get_camera(request.device_url, request.username, request.password)
+            ptz = camera.create_ptz_service()
+            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            
+            # Validate that the preset exists
+            try:
+                presets = ptz.GetPresets({'ProfileToken': profile_token})
+                if not any(getattr(p, 'token', None) == request.preset_token for p in presets):
+                    context.set_code(grpc.StatusCode.NOT_FOUND)
+                    context.set_details("Preset token not found")
+                    return onvif_pb2.UpdatePresetResponse(success=False, message="Preset token not found")
+            except Exception:
+                pass
+            
+            # If new position/zoom is provided, move to that position first
+            if request.HasField('pan_tilt') or request.HasField('zoom'):
+                try:
+                    move_req = ptz.create_type('AbsoluteMove')
+                    move_req.ProfileToken = profile_token
+                    
+                    if request.HasField('pan_tilt') and request.pan_tilt:
+                        move_req.Position = getattr(move_req, 'Position', {})
+                        move_req.Position['PanTilt'] = {'x': request.pan_tilt.position.x, 'y': request.pan_tilt.position.y}
+                        move_req.Speed = getattr(move_req, 'Speed', {})
+                        move_req.Speed['PanTilt'] = {'x': request.pan_tilt.speed.x, 'y': request.pan_tilt.speed.y}
+                    
+                    if request.HasField('zoom') and request.zoom:
+                        move_req.Position = getattr(move_req, 'Position', {})
+                        move_req.Position['Zoom'] = {'x': request.zoom.position.x}
+                        move_req.Speed = getattr(move_req, 'Speed', {})
+                        move_req.Speed['Zoom'] = {'x': request.zoom.speed.x}
+                    
+                    ptz.AbsoluteMove(move_req)
+                    # Wait a moment for the movement to complete
+                    time.sleep(1)
+                    logger.info(f"Moved to new position before updating preset: {request.preset_token}")
+                except Exception as e:
+                    logger.warning(f"Failed to move to new position before updating preset: {e}")
+            
+            # Update the preset at the current position without removing/recreating
+            try:
+                set_req = ptz.create_type('SetPreset')
+                set_req.ProfileToken = profile_token
+                
+                # Only set PresetName if it's provided, otherwise rely on preset_token
+                if request.HasField('preset_name') and request.preset_name:
+                    set_req.PresetName = request.preset_name
+                    logger.info(f"Updating preset {request.preset_token} with new name: {request.preset_name}")
+                else:
+                    logger.info(f"Updating preset {request.preset_token} at current position (no name change)")
+                
+                # Try to set the preset with the existing token if the device supports it
+                try:
+                    set_req.PresetToken = request.preset_token
+                except AttributeError:
+                    # Some devices don't support PresetToken in SetPreset
+                    pass
+                
+                result = ptz.SetPreset(set_req)
+                
+                # Get the actual preset token from result
+                updated_token = getattr(result, 'PresetToken', request.preset_token)
+                
+                return onvif_pb2.UpdatePresetResponse(
+                    success=True, 
+                    message=f"Preset updated successfully. Token: {updated_token}"
+                )
+                
+            except Exception as e:
+                logger.error(f"Failed to update preset: {e}")
+                return onvif_pb2.UpdatePresetResponse(
+                    success=False, 
+                    message=f"Failed to update preset: {e}"
+                )
+                
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Failed to update preset: {e}")
+            return onvif_pb2.UpdatePresetResponse(success=False, message=f"Failed to update preset: {e}")
+
     # ============================================================================
     # Preset Tour Methods - Unified Interface
     # ============================================================================
@@ -925,6 +1008,39 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                 message=f"Failed to operate preset tour: {e}"
             )
 
+    def DeletePresetTour(self, request, context):
+        """Delete a preset tour - handles both native and manual tours."""
+        try:
+            camera = self._get_camera(request.device_url, request.username, request.password)
+            camera_key = self._get_camera_key(request.device_url, request.username)
+            has_native_support = self._check_native_preset_tour_support(camera, request.device_url, request.username)
+            
+            # Check if it's a manual tour first
+            manual_tours = self.preset_tours.get(camera_key, [])
+            is_manual_tour = any(t['token'] == request.tour_token for t in manual_tours)
+            
+            if is_manual_tour:
+                logger.info(f"Deleting manual preset tour: {request.tour_token}")
+                return self._delete_manual_tour(request, context, camera_key)
+            elif has_native_support:
+                logger.info(f"Deleting native preset tour: {request.tour_token}")
+                return self._delete_native_tour(request, context, camera)
+            else:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details("Tour not found")
+                return onvif_pb2.DeletePresetTourResponse(
+                    success=False,
+                    message="Tour not found"
+                )
+                
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Failed to delete preset tour: {e}")
+            return onvif_pb2.DeletePresetTourResponse(
+                success=False,
+                message=f"Failed to delete preset tour: {e}"
+            )
+
     # ============================================================================
     # Native Preset Tour Implementation
     # ============================================================================
@@ -1037,6 +1153,28 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
             
         except Exception as e:
             logger.error(f"Failed to operate native tour: {e}")
+            raise
+
+    def _delete_native_tour(self, request, context, camera):
+        """Delete a native ONVIF preset tour."""
+        try:
+            profile_token = self._resolve_profile_token(camera, self._get_profile_token_safely(request), require_ptz=True)
+            ptz = camera.create_ptz_service()
+            
+            delete_req = ptz.create_type('RemovePresetTour')
+            delete_req.ProfileToken = profile_token
+            delete_req.PresetTourToken = request.tour_token
+            
+            ptz.RemovePresetTour(delete_req)
+            
+            logger.info(f"Deleted native preset tour: {request.tour_token}")
+            return onvif_pb2.DeletePresetTourResponse(
+                success=True,
+                message="Native preset tour deleted successfully"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to delete native tour: {e}")
             raise
 
     # ============================================================================
@@ -1185,6 +1323,37 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
         context.set_code(grpc.StatusCode.NOT_FOUND)
         context.set_details("Manual tour not found")
         return onvif_pb2.OperatePresetTourResponse(
+            success=False,
+            message="Manual tour not found"
+        )
+
+    def _delete_manual_tour(self, request, context, camera_key):
+        """Delete a manual preset tour."""
+        tours = self.preset_tours.get(camera_key, [])
+        
+        for i, tour_data in enumerate(tours):
+            if tour_data['token'] == request.tour_token:
+                # Stop the tour if it's running
+                if tour_data.get('is_running', False):
+                    tour_data['is_running'] = False
+                    tour_data['stop_manual_loop'] = True
+                    
+                    if tour_data.get('manual_loop_thread') and tour_data['manual_loop_thread'].is_alive():
+                        logger.info(f"Stopping manual loop before deletion for tour: {tour_data['name']}")
+                        tour_data['manual_loop_thread'].join(timeout=5)
+                
+                # Remove the tour from the list
+                del self.preset_tours[camera_key][i]
+                
+                logger.info(f"Deleted manual preset tour: {request.tour_token}")
+                return onvif_pb2.DeletePresetTourResponse(
+                    success=True,
+                    message="Manual preset tour deleted successfully"
+                )
+        
+        context.set_code(grpc.StatusCode.NOT_FOUND)
+        context.set_details("Manual tour not found")
+        return onvif_pb2.DeletePresetTourResponse(
             success=False,
             message="Manual tour not found"
         )

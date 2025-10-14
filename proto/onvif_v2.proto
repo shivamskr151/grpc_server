@@ -253,6 +253,22 @@ message CreatePresetResponse {
   string preset_token = 3;
 }
 
+message UpdatePresetRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string preset_token = 5;
+  optional string preset_name = 6;
+  optional PanTilt pan_tilt = 7;
+  optional Zoom zoom = 8;
+}
+
+message UpdatePresetResponse {
+  bool success = 1;
+  string message = 2;
+}
+
 // =============================================================================
 // Preset Tours (Unified - Native/Manual Auto-Detection)
 // =============================================================================
@@ -336,6 +352,19 @@ message OperatePresetTourResponse {
   string message = 2;
 }
 
+message DeletePresetTourRequest {
+  string device_url = 1;
+  string username = 2;
+  string password = 3;
+  optional string profile_token = 4;
+  string tour_token = 5;
+}
+
+message DeletePresetTourResponse {
+  bool success = 1;
+  string message = 2;
+}
+
 
 
 // =============================================================================
@@ -364,10 +393,12 @@ service OnvifService {
   rpc SetPreset(SetPresetRequest) returns (SetPresetResponse);
   rpc RemovePreset(RemovePresetRequest) returns (RemovePresetResponse);
   rpc CreatePreset(CreatePresetRequest) returns (CreatePresetResponse);
+  rpc UpdatePreset(UpdatePresetRequest) returns (UpdatePresetResponse);
   
   // Preset Tours (Unified - Auto-detects native vs manual)
   rpc GetPresetTours(GetPresetToursRequest) returns (GetPresetToursResponse);
   rpc CreatePresetTour(CreatePresetTourRequest) returns (CreatePresetTourResponse);
   rpc ModifyPresetTour(ModifyPresetTourRequest) returns (ModifyPresetTourResponse);
   rpc OperatePresetTour(OperatePresetTourRequest) returns (OperatePresetTourResponse);
+  rpc DeletePresetTour(DeletePresetTourRequest) returns (DeletePresetTourResponse);
 }
