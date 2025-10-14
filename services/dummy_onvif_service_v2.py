@@ -52,19 +52,19 @@ class DummyOnvifServiceV2(onvif_pb2_grpc.OnvifServiceServicer):
             # Initialize with 3 default presets
             self.presets[key] = [
                 {
-                    'token': 'preset_1',
+                    'token': 'Preset_1',
                     'name': 'Home Position',
                     'pan_tilt': {'x': 0.0, 'y': 0.0},
                     'zoom': {'x': 0.0}
                 },
                 {
-                    'token': 'preset_2',
+                    'token': 'Preset_2',
                     'name': 'Entrance View',
                     'pan_tilt': {'x': 0.5, 'y': 0.2},
                     'zoom': {'x': 0.3}
                 },
                 {
-                    'token': 'preset_3',
+                    'token': 'Preset_3',
                     'name': 'Parking View',
                     'pan_tilt': {'x': -0.3, 'y': -0.1},
                     'zoom': {'x': 0.5}
@@ -409,7 +409,7 @@ class DummyOnvifServiceV2(onvif_pb2_grpc.OnvifServiceServicer):
             
             if not preset_token:
                 # Create new preset
-                preset_token = f"preset_{len(self.presets[key]) + 1}"
+                preset_token = f"Preset_{len(self.presets[key]) + 1}"
                 new_preset = {
                     'token': preset_token,
                     'name': preset_name,

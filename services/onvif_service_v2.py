@@ -206,17 +206,49 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
         try:
             ptz = camera.create_ptz_service()
             
+            # Get available presets once at the start
+            try:
+                presets_response = ptz.GetPresets({'ProfileToken': profile_token})
+                available_preset_tokens = [getattr(p, 'token', None) for p in presets_response if getattr(p, 'token', None)]
+                logger.info(f"Available preset tokens: {available_preset_tokens}")
+            except Exception as e:
+                logger.warning(f"Failed to get available presets: {e}")
+                available_preset_tokens = []
+            
             while not tour_data['stop_manual_loop']:
                 for step in tour_data['steps']:
                     if tour_data['stop_manual_loop']:
                         break
                     
-                    logger.info(f"Manual loop - Moving to preset: {step['preset_token']} at speed: {step['speed']}")
+                    preset_token = step['preset_token']
+                    logger.info(f"Manual loop - Moving to preset: {preset_token} at speed: {step['speed']}")
+                    
+                    # Check if preset token exists
+                    if preset_token not in available_preset_tokens:
+                        logger.warning(f"Preset token '{preset_token}' does not exist on camera. Available presets: {available_preset_tokens}")
+                        # Try to find a similar preset or use the first available one
+                        if available_preset_tokens:
+                            # Try to find a preset with similar name (case-insensitive)
+                            similar_preset = None
+                            for available_token in available_preset_tokens:
+                                if preset_token.lower() == available_token.lower():
+                                    similar_preset = available_token
+                                    break
+                            
+                            if similar_preset:
+                                preset_token = similar_preset
+                                logger.info(f"Using similar preset token: {preset_token}")
+                            else:
+                                preset_token = available_preset_tokens[0]
+                                logger.info(f"Using first available preset token: {preset_token}")
+                        else:
+                            logger.error(f"No presets available on camera, skipping step")
+                            continue
                     
                     try:
                         goto_request = ptz.create_type('GotoPreset')
                         goto_request.ProfileToken = profile_token
-                        goto_request.PresetToken = step['preset_token']
+                        goto_request.PresetToken = preset_token
                         
                         if hasattr(goto_request, 'Speed') and step['speed'] > 0:
                             goto_request.Speed = {
@@ -227,16 +259,16 @@ class OnvifService(onvif_pb2_grpc.OnvifServiceServicer):
                         ptz.GotoPreset(goto_request)
                         
                         wait_time = step['wait_time']
-                        logger.info(f"Manual loop - Waiting {wait_time} seconds at preset: {step['preset_token']}")
+                        logger.info(f"Manual loop - Waiting {wait_time} seconds at preset: {preset_token}")
                         
                         for _ in range(wait_time):
                             if tour_data['stop_manual_loop']:
-                                logger.info(f"Manual loop stopped during wait at preset: {step['preset_token']}")
+                                logger.info(f"Manual loop stopped during wait at preset: {preset_token}")
                                 return
                             time.sleep(1)
                             
                     except Exception as e:
-                        logger.warning(f"Failed to move to preset {step['preset_token']}: {e}")
+                        logger.warning(f"Failed to move to preset {preset_token}: {e}")
                         continue
                         
         except Exception as e:

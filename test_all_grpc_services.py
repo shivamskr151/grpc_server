@@ -12,6 +12,13 @@ Usage:
 import sys
 import time
 import grpc
+import os
+
+# Add the current directory to Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(current_dir)
+sys.path.append(os.path.join(current_dir, 'proto'))
+
 from proto import onvif_v2_pb2 as onvif_pb2
 from proto import onvif_v2_pb2_grpc as onvif_pb2_grpc
 
